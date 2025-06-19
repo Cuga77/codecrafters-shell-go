@@ -9,7 +9,7 @@ import (
 var _ = fmt.Fprint
 
 func main() {
-	for true {
+	for {
 		fmt.Fprint(os.Stdout, "$ ")
 
 		command, err := bufio.NewReader(os.Stdin).ReadString('\n')
