@@ -21,6 +21,11 @@ func main() {
 		if strings.TrimSpace(command) == "exit 0" {
 			os.Exit(0)
 		}
+
+		if strings.TrimSpace(command) == "echo" {
+			fmt.Println(command[:len(command)-1])
+		}
+
 		fmt.Println(command[:len(command)-1] + ": command not found")
 	}
 }
