@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strings"
 )
 
 var _ = fmt.Fprint
@@ -20,10 +21,10 @@ func main() {
 		}
 
 		switch command {
+		case "echo":
+			fmt.Println(strings.TrimPrefix(command, "echo "))
 		case "exit 0":
 			os.Exit(0)
-		case "echo":
-			fmt.Println(command[1:])
 		default:
 			fmt.Println(command[:len(command)-1] + ": command not found")
 		}
