@@ -17,6 +17,7 @@ var commands = []string{
 }
 
 func main() {
+OuterLoop:
 	for {
 		fmt.Fprint(os.Stdout, "$ ")
 		command, err := bufio.NewReader(os.Stdin).ReadString('\n')
@@ -32,7 +33,7 @@ func main() {
 			for _, validCommand := range commands {
 				if validCommand == cmd {
 					fmt.Println(cmd, "is a shell builtin")
-					continue
+					continue OuterLoop
 				}
 			}
 			fmt.Println(cmd + ": not found")
