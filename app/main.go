@@ -13,7 +13,7 @@ var commands = []string{
 	"echo",
 	"cd",
 	"exit",
-	"tipe",
+	"type",
 }
 
 func main() {
