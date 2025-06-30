@@ -58,11 +58,19 @@ func exit(input []string) {
 }
 
 func changeDirectory(args []string) {
-	if len(args) < 1 {
-		return
+	var targetDir string
+	var err error
+	if len(args) == 0 || args[0] == "~" {
+		targetDir, err = os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cd: %v\n", err)
+			return
+		}
+	} else {
+		targetDir = args[0]
 	}
-	targetDir := args[0]
-	err := os.Chdir(targetDir)
+
+	err = os.Chdir(targetDir)
 	if err != nil {
 		fmt.Printf("cd: %s: No such file or directory\n", targetDir)
 	}
