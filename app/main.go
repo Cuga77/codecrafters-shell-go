@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -26,69 +25,48 @@ type nopCloser struct {
 
 func (nopCloser) Close() error { return nil }
 
-type shellCompleter struct{}
+type pathCompleter struct{}
 
-func (s *shellCompleter) Do(line []rune, pos int) ([][]rune, int) {
-	start := pos - 1
-	for start >= 0 {
-		if line[start] == ' ' {
-			break
-		}
-		start--
-	}
-	start++
-	prefix := string(line[start:pos])
-
-	if strings.Contains(string(line[:start]), " ") {
+func (p *pathCompleter) Do(line []rune, pos int) ([][]rune, int) {
+	if strings.ContainsRune(string(line), ' ') {
 		return nil, 0
 	}
+	prefix := string(line)
 
-	suggestions := make(map[string]struct{})
-
-	for _, cmd := range COMMANDS {
-		if strings.HasPrefix(cmd, prefix) {
-			suggestions[cmd] = struct{}{}
-		}
-	}
-
+	var suggestions [][]rune
 	pathStr := os.Getenv("PATH")
 	paths := filepath.SplitList(pathStr)
+	seen := make(map[string]struct{})
 
 	for _, path := range paths {
 		files, err := os.ReadDir(path)
 		if err != nil {
 			continue
 		}
-
 		for _, file := range files {
-			if !file.IsDir() {
+			name := file.Name()
+			if _, alreadySeen := seen[name]; !file.IsDir() && !alreadySeen && strings.HasPrefix(name, prefix) {
 				info, err := file.Info()
 				if err == nil && info.Mode().Perm()&0111 != 0 {
-					if strings.HasPrefix(file.Name(), prefix) {
-						suggestions[file.Name()] = struct{}{}
-					}
+					suggestions = append(suggestions, []rune(name))
+					seen[name] = struct{}{}
 				}
 			}
 		}
 	}
+	return suggestions, len(prefix)
+}
 
-	if len(suggestions) == 0 {
+type bellCompleter struct {
+	completer readline.AutoCompleter
+}
+
+func (c *bellCompleter) Do(line []rune, pos int) ([][]rune, int) {
+	completions, length := c.completer.Do(line, pos)
+	if len(completions) == 0 {
 		fmt.Print("\x07")
-		return nil, 0
 	}
-
-	var completions [][]rune
-	if len(suggestions) == 1 {
-		for s := range suggestions {
-			completions = append(completions, []rune(s+" "))
-		}
-	} else {
-		for s := range suggestions {
-			completions = append(completions, []rune(s))
-		}
-	}
-
-	return completions, len(prefix)
+	return completions, length
 }
 
 func parseCommand(command string) []string {
@@ -237,7 +215,12 @@ func changeDirectory(args []string, stderrFile string, appendStderr bool) {
 }
 
 func isCommandInSlice(a string, list []string) bool {
-	return slices.Contains(list, a)
+	for _, b := range list {
+		if b == a {
+			return true
+		}
+	}
+	return false
 }
 
 func typeBuiltIn(args []string, stdoutFile string, stderrFile string, appendStdout bool, appendStderr bool) {
@@ -310,9 +293,26 @@ func executeExternalCommand(programName string, args []string, stdoutFile string
 }
 
 func main() {
+	builtinCompleter := readline.NewPrefixCompleter(
+		readline.PcItem("echo"),
+		readline.PcItem("exit"),
+		readline.PcItem("type"),
+		readline.PcItem("pwd"),
+		readline.PcItem("cd"),
+	)
+
+	masterCompleter := readline.NewPrefixCompleter(
+		builtinCompleter,
+		&pathCompleter{},
+	)
+
+	finalCompleter := &bellCompleter{
+		completer: masterCompleter,
+	}
+
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:       "$ ",
-		AutoComplete: &shellCompleter{},
+		AutoComplete: finalCompleter,
 	})
 	if err != nil {
 		panic(err)
