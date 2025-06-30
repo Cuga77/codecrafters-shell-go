@@ -265,6 +265,15 @@ func pipedCommandProccesor(pipedCommands []string, PATH string) {
 		} else {
 			cmdExec.Stdin = os.Stdin
 		}
+		/*
+			fmt.Printf("Command Name executable: %v\n", cmdName)
+			outputBytes := make([]byte, 1028)
+			_, err := prevInputPipeReader.Read(outputBytes)
+			if err != nil {
+				fmt.Printf("Error reading from previous command: %v\n", err)
+			}
+			fmt.Printf("Result from previous command: %v\n", string(outputBytes))
+		*/
 		if i < len(pipedCommands)-1 {
 			reader, writer := io.Pipe()
 			cmdExec.Stdout = writer
@@ -281,6 +290,7 @@ func pipedCommandProccesor(pipedCommands []string, PATH string) {
 		}
 		cmds = append(cmds, cmdExec)
 	}
+	// Start all of the commands we have collected in cmds
 	for _, cmd := range cmds {
 		err := cmd.Start()
 		if err != nil {
@@ -304,6 +314,7 @@ func commandProcessor(input, PATH string) {
 		commandParts[i] = strings.Trim(commandParts[i], "\r\n ")
 	}
 	directories := strings.Split(PATH, ":")
+	// default stdOut and stdErr output locations
 	outputFilePath := ""
 	errFilePath := ""
 	outputAppendFilePath := ""
@@ -311,8 +322,10 @@ func commandProcessor(input, PATH string) {
 	outputWriter := os.Stdout
 	errWriter := os.Stdout
 
+	// create an argParts without the redirection symbol
 	outputFilePath, errFilePath, outputAppendFilePath, errFileAppendFilePath = parseOutputRedirect(input)
 
+	// remove redirection so this is not interpreted as a command argument
 	removedRedirect := removeRedirection(input)
 	cmdParsed, argsParts := parseCommandArgs(removedRedirect)
 
@@ -354,9 +367,14 @@ func commandProcessor(input, PATH string) {
 				cmd.Stdin = os.Stdin
 				cmd.Stdout = outputWriter
 				cmd.Stderr = errWriter
+				err := cmd.Run()
+				if err != nil {
+					//fmt.Fprintln(errWriter, "Error running command: "+err.Error())
+				}
 				return
 			}
 		}
+		// command contains a trailing \n byte so we slice out that last bit
 		fmt.Fprintln(errWriter, strings.Join(append([]string{commandName}, argsParts...), " ")+": command not found")
 		return
 	}
@@ -434,6 +452,7 @@ func parseCommandArgs(input string) (string, []string) {
 			}
 			escapeChar = false
 		case char == '\\':
+			// single quote already handled so in case of double or unquoted
 			escapeChar = true
 		case char == '"':
 			inDoubleQuotes = !inDoubleQuotes
@@ -464,8 +483,8 @@ func parseCommandArgs(input string) (string, []string) {
 }
 
 func parseCommandName(input, commandName string) (string, int) {
-	inDoubleQuotes := commandName[0] == '"'
-	inSingleQuotes := commandName[0] == '\''
+	inDoubleQuotes := commandName[0] == '"'  // in double quotes
+	inSingleQuotes := commandName[0] == '\'' // in single quotes
 
 	commandName = ""
 	escapedChar := false
@@ -473,6 +492,7 @@ func parseCommandName(input, commandName string) (string, int) {
 	for k, char := range input[1:] {
 		if inDoubleQuotes {
 			if char == '"' && !escapedChar {
+				// unescaped double quote if our name of command started with double quote then end
 				i = k + 1
 				break
 			}
@@ -495,6 +515,7 @@ func parseCommandName(input, commandName string) (string, int) {
 			}
 		} else if inSingleQuotes {
 			if char == '\'' {
+				// single quote encountered means end of command name
 				i = k + 1
 				break
 			}
@@ -576,6 +597,47 @@ func shellBuiltInHandler(commandName, argsString string, outputWriter, errWriter
 	}
 }
 
+/*
+	func parseOutputRedirect(input string) (string, string) {
+		var i int = 0
+		outputFilePath := ""
+		errFilePath := ""
+		foundRedirectSymbol := false
+		foundErrRedirectSymbol := false
+		inQuotes := false
+		for {
+			if i == len(input) {
+				break
+			}
+			if !inQuotes {
+				if input[i] == '>' {
+					if input[i-1] == '2' {
+						foundErrRedirectSymbol = true
+						if foundRedirectSymbol {
+							foundRedirectSymbol = false
+						}
+					} else {
+						foundRedirectSymbol = true
+						if foundErrRedirectSymbol {
+							foundErrRedirectSymbol = false
+						}
+					}
+				}
+			}
+			if foundRedirectSymbol {
+				outputFilePath += string(input[i])
+			}
+			if foundErrRedirectSymbol {
+				errFilePath += string(input[i])
+			}
+			i++
+		}
+		fmt.Println("FILE PATHS FOR REDIRECT")
+		fmt.Println(outputFilePath)
+		fmt.Println(errFilePath)
+		return strings.Trim(outputFilePath, " >"), strings.Trim(errFilePath, " >")
+	}
+*/
 func parseOutputRedirect(input string) (string, string, string, string) {
 	stdOutRedirectPattern := `(?:^|\s)1?>(?:\s*"([^"]+)"|\s*'([^']+)'|\s*([^\s>]+))`
 	stdOutAppendPattern := `(?:^|\s)1?>>(?:\s*"([^"]+)"|\s*'([^']+)'|\s*([^\s>]+))`
