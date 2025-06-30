@@ -11,7 +11,7 @@ import (
 
 var _ = fmt.Fprint
 
-var commands = []string{
+var COMMANDS = []string{
 	"echo",
 	"cd",
 	"exit",
@@ -48,8 +48,8 @@ func exit(input []string) {
 
 func searchPath(command string) (string, bool) {
 	path := os.ExpandEnv("$PATH")
-	pathParts := strings.Split(path, ":")
-	for _, part := range pathParts {
+	pathParts := strings.SplitSeq(path, ":")
+	for part := range pathParts {
 		files, err := os.ReadDir(part)
 		if err != nil {
 			continue
@@ -68,11 +68,10 @@ func searchPath(command string) (string, bool) {
 }
 
 func typeBuiltIn(input []string) {
-	BUILTINS := []string{"echo", "exit", "cd", "type"}
 	if len(input) < 1 {
 		fmt.Println("Not enough arguments for type")
 		return
-	} else if contains(input[0], BUILTINS) {
+	} else if contains(input[0], COMMANDS) {
 		fmt.Println(input[0], "is a shell builtin")
 		return
 	}
