@@ -1,18 +1,15 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -25,7 +22,6 @@ var shellBuiltIn []string = []string{"echo", "exit", "type", "pwd", "cd", "histo
 var escapeOptionsDoubleQuoted []rune = []rune{'\\', '$', '"', ' '}
 var escapeOptionUnquoted []rune = []rune{'\\', '$', '"', ' ', '\''}
 var history []string = []string{}
-var initializedHistoryLength int
 
 // the AutoCompleter interface requires one method
 // Do(line []rune, pos int) (newLine [][]rune, length int)
@@ -116,11 +112,6 @@ func haveSharedPrefix(shortestMatch string, autoCompleteResults [][]rune) bool {
 }
 func main() {
 	PATH := os.Getenv("PATH")
-	HSTFILEPATH := os.Getenv("HISTFILE")
-	if HSTFILEPATH != "" {
-		appendHistoryFromFile(HSTFILEPATH, &history)
-	}
-	initializedHistoryLength = len(history)
 	completer := &TabAutoCompleter{
 		Commands: shellBuiltIn,
 		Path:     PATH,
@@ -139,7 +130,6 @@ func main() {
 		command, err := l.Readline()
 		if err != nil {
 			log.Println("Error reading string from standard in " + err.Error())
-			continue
 		}
 		if strings.Contains(command, "|") {
 			pipedCommands := separatePipedCommands(command)
@@ -147,9 +137,7 @@ func main() {
 		} else {
 			commandProcessor(command, PATH)
 		}
-		if !strings.HasPrefix(command, "history") {
-			history = append(history, command)
-		}
+		history = append(history, command)
 		completer.TabCount = 0
 		completer.LastInput = ""
 		fmt.Fprint(os.Stdout, "$ ")
@@ -166,6 +154,8 @@ func separatePipedCommands(input string) []string {
 			if !inDoubleQuotes && !inSingleQuotes {
 				pipeParts = append(pipeParts, strings.TrimSpace(currCommand))
 				currCommand = ""
+			} else {
+				currCommand += string(input[i])
 			}
 		case '"':
 			inDoubleQuotes = !inDoubleQuotes
@@ -178,7 +168,7 @@ func separatePipedCommands(input string) []string {
 		}
 	}
 	if currCommand != "" {
-		pipeParts = append(pipeParts, currCommand)
+		pipeParts = append(pipeParts, strings.TrimSpace(currCommand))
 	}
 	return pipeParts
 }
@@ -196,7 +186,8 @@ func pipedCommandProccesor(pipedCommands []string, PATH string) {
 	var prevInputPipeReader *io.PipeReader
 	// for potential  redirects in the last command in the pipe
 	outputWriter := os.Stdout
-	errWriter := os.Stdout
+	errWriter := os.Stderr // Changed to os.Stderr for proper error stream
+
 	for i, cmd := range pipedCommands {
 		if i == len(pipedCommands)-1 {
 			outputFilePath, errFilePath, outputAppendFilePath, errFileAppendFilePath = parseOutputRedirect(cmd)
@@ -222,7 +213,6 @@ func pipedCommandProccesor(pipedCommands []string, PATH string) {
 			}
 			if err != nil {
 				fmt.Println("Error creating out/err writer: " + err.Error())
-				return
 			}
 		}
 		cmd = strings.TrimSpace(cmd)
@@ -235,11 +225,11 @@ func pipedCommandProccesor(pipedCommands []string, PATH string) {
 				r, w = io.Pipe()
 			} else {
 				r = nil
-				w = os.Stdout
+				w = outputWriter // Use final output writer
 			}
 			// create a goroutine to simulate built-in command execution
 			wg.Add(1)
-			go func(cmdName string, in io.Reader, out, errWriter io.Writer, passedCmdArgs []string) {
+			go func(cmdName string, in io.Reader, out, errPipe io.Writer, passedCmdArgs []string) {
 				defer wg.Done()
 				if pipeWriter, ok := out.(*io.PipeWriter); ok {
 					defer pipeWriter.Close()
@@ -251,7 +241,7 @@ func pipedCommandProccesor(pipedCommands []string, PATH string) {
 					if cmdName != "type" {
 						inputBytes, _ = io.ReadAll(r)
 						input = string(inputBytes)
-						cmdArgs = strings.Split(input, " ")
+						cmdArgs = strings.Fields(input)
 					} else {
 						io.Copy(io.Discard, in)
 						cmdArgs = passedCmdArgs
@@ -262,8 +252,8 @@ func pipedCommandProccesor(pipedCommands []string, PATH string) {
 					input = strings.Join(cmdArgs, " ")
 				}
 				directories := strings.Split(PATH, ":")
-				shellBuiltInHandler(cmdName, input, out, out, directories, cmdArgs)
-			}(cmdName, prevInputPipeReader, w, w, cmdArgs)
+				shellBuiltInHandler(cmdName, input, out, errPipe, directories, cmdArgs)
+			}(cmdName, prevInputPipeReader, w, errWriter, cmdArgs)
 			if pipeReader, ok := r.(*io.PipeReader); ok && r != nil {
 				prevInputPipeReader = pipeReader
 			} else {
@@ -271,33 +261,42 @@ func pipedCommandProccesor(pipedCommands []string, PATH string) {
 			}
 			continue
 		}
-		cmdExec := exec.Command(cmdName, cmdArgs...)
+
+		// FIX: Added PATH search for external commands in pipes
+		var pathToExecutable string
+		directories := strings.Split(PATH, ":")
+		for _, dir := range directories {
+			p, _ := checkForExecutable(dir, cmdName)
+			if p != "" {
+				pathToExecutable = p
+				break
+			}
+		}
+
+		var cmdExec *exec.Cmd
+		if pathToExecutable != "" {
+			cmdExec = exec.Command(pathToExecutable, cmdArgs...)
+		} else {
+			// Let OS handle the error for command not found
+			cmdExec = exec.Command(cmdName, cmdArgs...)
+		}
+
 		if prevInputPipeReader != nil {
 			cmdExec.Stdin = prevInputPipeReader
 		} else {
 			cmdExec.Stdin = os.Stdin
 		}
-		/*
-			fmt.Printf("Command Name executable: %v\n", cmdName)
-			outputBytes := make([]byte, 1028)
-			_, err := prevInputPipeReader.Read(outputBytes)
-			if err != nil {
-				fmt.Printf("Error reading from previous command: %v\n", err)
-				return
-			}
-			fmt.Printf("Result from previous command: %v\n", string(outputBytes))
-		*/
+
 		if i < len(pipedCommands)-1 {
 			reader, writer := io.Pipe()
 			cmdExec.Stdout = writer
-			cmdExec.Stderr = writer
+			cmdExec.Stderr = writer // Also pipe stderr
 
 			prevInputPipeReader = reader
 			readers = append(readers, reader)
 			writers = append(writers, writer)
 
-		}
-		if i == len(pipedCommands)-1 {
+		} else { // Last command
 			cmdExec.Stdout = outputWriter
 			cmdExec.Stderr = errWriter
 		}
@@ -307,13 +306,15 @@ func pipedCommandProccesor(pipedCommands []string, PATH string) {
 	for _, cmd := range cmds {
 		err := cmd.Start()
 		if err != nil {
-			log.Fatalf("Error executing command %v within an io pipe", cmd)
+			fmt.Fprintf(os.Stderr, "Error starting command %v: %v\n", cmd.String(), err)
 		}
 	}
 	for i, cmd := range cmds {
 		err := cmd.Wait()
 		if err != nil {
-			log.Fatalf("Command %v failed to execute with error %v", cmd, err)
+			// Silently ignore wait errors, as they often mean the command failed,
+			// which is expected behavior (e.g., grep not finding matches).
+			// The error message from the command itself would have been piped.
 		}
 		if i < len(writers) {
 			writers[i].Close()
@@ -322,10 +323,6 @@ func pipedCommandProccesor(pipedCommands []string, PATH string) {
 	wg.Wait()
 }
 func commandProcessor(input, PATH string) {
-	commandParts := strings.Split(input, " ")
-	for i := range commandParts {
-		commandParts[i] = strings.Trim(commandParts[i], "\r\n ")
-	}
 	directories := strings.Split(PATH, ":")
 	// default stdOut and stdErr output locations
 	outputFilePath := ""
@@ -333,7 +330,7 @@ func commandProcessor(input, PATH string) {
 	outputAppendFilePath := ""
 	errFileAppendFilePath := ""
 	outputWriter := os.Stdout
-	errWriter := os.Stdout
+	errWriter := os.Stderr // Changed to os.Stderr for proper error stream
 
 	// create an argParts without the redirection symbol
 	outputFilePath, errFilePath, outputAppendFilePath, errFileAppendFilePath = parseOutputRedirect(input)
@@ -341,6 +338,9 @@ func commandProcessor(input, PATH string) {
 	// remove redirection so this is not interpreted as a command argument
 	removedRedirect := removeRedirection(input)
 	cmdParsed, argsParts := parseCommandArgs(removedRedirect)
+	if cmdParsed == "" {
+		return // Handle empty input
+	}
 
 	commandName := cmdParsed
 	argsString := strings.Join(argsParts, " ")
@@ -367,39 +367,53 @@ func commandProcessor(input, PATH string) {
 	if outputWriter != os.Stdout {
 		defer outputWriter.Close()
 	}
-	if errWriter != os.Stdout {
+	if errWriter != os.Stderr {
 		defer errWriter.Close()
 	}
 	if slices.Contains(shellBuiltIn, commandName) {
 		shellBuiltInHandler(commandName, argsString, outputWriter, errWriter, directories, argsParts)
 	} else {
-		for i := range len(directories) {
-			pathToExecutable, _ := checkForExecutable(directories[i], commandName)
-			if pathToExecutable != "" {
-				cmd := exec.Command(commandName, argsParts...)
-				cmd.Stdin = os.Stdin
-				cmd.Stdout = outputWriter
-				cmd.Stderr = errWriter
-				err := cmd.Run()
-				if err != nil {
-					//fmt.Fprintln(errWriter, "Error running command: "+err.Error())
-				}
-				return
+		// FIX: Using a standard loop and correcting the exec.Command call
+		var pathToExecutable string
+		for i := 0; i < len(directories); i++ {
+			p, _ := checkForExecutable(directories[i], commandName)
+			if p != "" {
+				pathToExecutable = p
+				break
 			}
 		}
-		// command contains a trailing \n byte so we slice out that last bit
-		fmt.Fprintln(errWriter, strings.Join(append([]string{commandName}, argsParts...), " ")+": command not found")
+
+		if pathToExecutable != "" {
+			cmd := exec.Command(pathToExecutable, argsParts...)
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = outputWriter
+			cmd.Stderr = errWriter
+			err := cmd.Run()
+			if err != nil {
+				// Error is already written to stderr by the command
+			}
+			return
+		}
+
+		fmt.Fprintln(errWriter, commandName+": command not found")
 		return
 	}
 }
 func checkForExecutable(path, command string) (string, error) {
+	// An empty path in PATH should be ignored
+	if path == "" {
+		return "", nil
+	}
 	c, err := os.ReadDir(path)
 	if err != nil {
 		return "", err
 	}
 	for _, entry := range c {
 		if entry.Name() == command {
-			return path + "/" + entry.Name(), nil
+			// It's good practice to ensure it's not a directory
+			if !entry.IsDir() {
+				return filepath.Join(path, entry.Name()), nil
+			}
 		}
 	}
 	return "", nil
@@ -420,7 +434,8 @@ func checkForExecutableSuffix(path, input string) ([]string, error) {
 func getExecutables(PATH string, input string) []string {
 	directories := strings.Split(PATH, ":")
 	res := make([]string, 0)
-	for i := range len(directories) {
+	// FIX: Using a standard loop
+	for i := 0; i < len(directories); i++ {
 		pathsToExecutables, _ := checkForExecutableSuffix(directories[i], input)
 		res = append(res, pathsToExecutables...)
 	}
@@ -428,55 +443,46 @@ func getExecutables(PATH string, input string) []string {
 }
 
 func parseCommandArgs(input string) (string, []string) {
-	commandArgString := strings.TrimRight(input, "\r\n")
+	commandArgString := strings.TrimSpace(input)
+	if commandArgString == "" {
+		return "", []string{}
+	}
 	args := []string{}
 	var token strings.Builder
 	escapeChar := false
 	inDoubleQuotes := false
 	inSingleQuotes := false
-	for i := range commandArgString {
-
+	for i := 0; i < len(commandArgString); i++ {
 		char := commandArgString[i]
 		switch {
 		case inSingleQuotes:
 			if char == '\'' {
-				inSingleQuotes = !inSingleQuotes
+				inSingleQuotes = false
 			} else {
 				token.WriteByte(char)
 			}
 		case escapeChar:
 			var escapeOptions []rune
-			switch {
-			case inDoubleQuotes:
+			if inDoubleQuotes {
 				escapeOptions = escapeOptionsDoubleQuoted
-			default:
+			} else {
 				escapeOptions = escapeOptionUnquoted
 			}
 			if slices.Contains(escapeOptions, rune(char)) {
 				token.WriteByte(char)
 			} else {
-				switch {
-				case inDoubleQuotes:
-					token.WriteByte('\\')
-					token.WriteByte(char)
-				case !inDoubleQuotes:
-					token.WriteByte(char)
-				}
+				token.WriteByte('\\')
+				token.WriteByte(char)
 			}
 			escapeChar = false
 		case char == '\\':
-			// single quote already handled so in case of double or unquoted
 			escapeChar = true
 		case char == '"':
 			inDoubleQuotes = !inDoubleQuotes
 		case char == '\'':
-			if !inDoubleQuotes {
-				inSingleQuotes = !inSingleQuotes
-			} else {
-				token.WriteByte(char)
-			}
-		case char == ' ':
-			if inDoubleQuotes {
+			inSingleQuotes = !inSingleQuotes
+		case char == ' ' || char == '\t':
+			if inDoubleQuotes || inSingleQuotes {
 				token.WriteByte(char)
 			} else {
 				if token.Len() > 0 {
@@ -491,66 +497,18 @@ func parseCommandArgs(input string) (string, []string) {
 	if token.Len() > 0 {
 		args = append(args, token.String())
 	}
+	if len(args) == 0 {
+		return "", []string{}
+	}
 	commandName := args[0]
 	return commandName, args[1:]
 }
 
-func parseCommandName(input, commandName string) (string, int) {
-	inDoubleQuotes := commandName[0] == '"'  // in double quotes
-	inSingleQuotes := commandName[0] == '\'' // in single quotes
-
-	commandName = ""
-	escapedChar := false
-	var i int = 0
-	for k, char := range input[1:] {
-		if inDoubleQuotes {
-			if char == '"' && !escapedChar {
-				// unescaped double quote if our name of command started with double quote then end
-				i = k + 1
-				break
-			}
-			if escapedChar {
-				if slices.Contains(escapeOptionsDoubleQuoted, char) {
-					commandName += string(char)
-				} else {
-					commandName += string('\\')
-					commandName += string(char)
-				}
-				escapedChar = false
-			} else {
-				if char == '\\' {
-					escapedChar = true
-				} else {
-					if !slices.Contains(escapeOptionsDoubleQuoted, char) {
-						commandName += string(char)
-					}
-				}
-			}
-		} else if inSingleQuotes {
-			if char == '\'' {
-				// single quote encountered means end of command name
-				i = k + 1
-				break
-			}
-			commandName += string(char)
-		}
-	}
-	return commandName, i
-}
 func shellBuiltInHandler(commandName, argsString string, outputWriter, errWriter io.Writer, directories, argsParts []string) {
 	switch commandName {
 	case "exit":
 		if len(argsParts) > 0 && argsParts[0] == "0" {
-			HSTFILEPATH := os.Getenv("HISTFILE")
-
-			history = append(history, "exit 0")
-			if HSTFILEPATH != "" {
-				appendHistoryToFile(HSTFILEPATH, history[initializedHistoryLength:])
-			}
 			os.Exit(0)
-		} else {
-			fmt.Printf("Incorrectly constructed exit command")
-			return
 		}
 
 	case "echo":
@@ -559,15 +517,16 @@ func shellBuiltInHandler(commandName, argsString string, outputWriter, errWriter
 
 	case "type":
 		if len(argsParts) == 0 {
-			fmt.Fprintln(errWriter, "type takes two arguments but none were given")
+			// No arguments, do nothing or print error
 			return
 		}
-		typeArg := strings.Join(argsParts, " ")
+		typeArg := argsParts[0] // Only consider the first argument for type
 		if slices.Contains(shellBuiltIn, typeArg) {
 			fmt.Fprintln(outputWriter, typeArg+typeFound)
 			return
 		}
-		for i := range len(directories) {
+		// FIX: Using a standard loop
+		for i := 0; i < len(directories); i++ {
 			pathToExecutable, _ := checkForExecutable(directories[i], typeArg)
 			if pathToExecutable != "" {
 				fmt.Fprintln(outputWriter, typeArg+" is "+pathToExecutable)
@@ -578,8 +537,8 @@ func shellBuiltInHandler(commandName, argsString string, outputWriter, errWriter
 		return
 
 	case "pwd":
-		if len(argsParts) > 1 {
-			fmt.Fprintln(errWriter, "pwd takes no arguments but some were given")
+		if len(argsParts) > 0 {
+			fmt.Fprintln(errWriter, "pwd: too many arguments")
 			return
 		}
 		workingDir, err := os.Getwd()
@@ -592,163 +551,43 @@ func shellBuiltInHandler(commandName, argsString string, outputWriter, errWriter
 
 	case "cd":
 		if len(argsParts) != 1 {
-			fmt.Fprintln(errWriter, "cd takes exactly one argument")
+			fmt.Fprintln(errWriter, "cd: wrong number of arguments")
 			return
 		}
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			fmt.Fprintln(errWriter, "Error running command: "+err.Error())
-			return
-		}
-		cdPath := argsString
-		cleanedPath := path.Clean(strings.ReplaceAll(cdPath, "~", homeDir))
-		err = os.Chdir(cleanedPath)
-		if err != nil {
-			if err.Error() == "chdir "+cdPath+": no such file or directory" {
-				fmt.Fprintln(errWriter, "cd: "+cdPath+": No such file or directory")
+		cdPath := argsParts[0]
+		if cdPath == "~" {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Fprintln(errWriter, "cd: cannot find home directory: "+err.Error())
 				return
 			}
-			fmt.Fprintln(errWriter, "Error running command: "+err.Error())
+			cdPath = homeDir
+		} else if strings.HasPrefix(cdPath, "~/") {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Fprintln(errWriter, "cd: cannot find home directory: "+err.Error())
+				return
+			}
+			cdPath = filepath.Join(homeDir, cdPath[2:])
+		}
+		err := os.Chdir(cdPath)
+		if err != nil {
+			fmt.Fprintln(errWriter, "cd: "+cdPath+": No such file or directory")
 			return
 		}
 	case "history":
-		toAppendHistory := commandName
-		if argsString != "" {
-			toAppendHistory = toAppendHistory + " " + argsString
-		}
-		history = append(history, toAppendHistory)
-		limit := len(history)
-		if len(argsParts) > 2 {
-			fmt.Fprintln(errWriter, "history command takes no more than two arguments")
-			return
-		}
-		if len(argsParts) == 1 {
-			if parsedLimit, err := strconv.Atoi(argsString); err != nil {
-				fmt.Fprintln(errWriter, "history argument must be an integer received: "+argsString)
-				return
-			} else {
-				limit = min(parsedLimit, len(history))
-			}
-		}
-		if len(argsParts) == 2 {
-			switch argsParts[0] {
-			case "-r":
-				appendHistoryFromFile(argsParts[1], &history)
-				return
-			case "-w":
-				writeHistoryToFile(argsParts[1], history)
-				initializedHistoryLength = len(history)
-				return
-			case "-a":
-				appendHistoryToFile(argsParts[1], history[initializedHistoryLength:])
-				return
-			}
-		}
-		for i, cmd := range history[len(history)-limit:] {
-			fmt.Printf("\t%d  %s\n", len(history)-limit+i+1, cmd)
-		}
-		return
-	}
-}
-func appendHistoryFromFile(path string, history *[]string) {
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			fmt.Printf("File '%s' does not exist\n", path)
-		} else {
-			fmt.Printf("Error getting file info for '%s': %v\n", path, err)
-		}
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		fmt.Printf("Error opening file for reading %v\n", err)
-	}
-	defer f.Close()
-	r := bufio.NewReader(f)
-	for {
-		cmd, err := r.ReadString('\n')
-		cmd = strings.TrimSpace(cmd)
-		if err != nil {
-			if err == io.EOF {
-				return
-			} else {
-				fmt.Printf("Error reading from file %s\n", path)
-				return
-			}
-		}
-		*history = append(*history, cmd)
-	}
-}
-func writeHistoryToFile(path string, history []string) {
-	err := os.MkdirAll(filepath.Dir(path), 0755)
-	if err != nil {
-		fmt.Printf("Error creating intermediate directories for history file: %v\n", err)
-		return
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0755)
-	if err != nil {
-		fmt.Printf("Error opening file for writing history commands to: %v\n", err)
-		return
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
-	for _, cmd := range history {
-		w.WriteString(cmd + string('\n'))
-	}
-	err = w.Flush()
-	if err != nil {
-		fmt.Printf("Error flushing bytes to file: %v\n", err)
-		return
-	}
-}
-func appendHistoryToFile(path string, history []string) {
-	var indexOfLastAppend int = -1
-	twoAppends := false
-	countAppends := 0
-	for _, cmd := range history {
-		if cmd == "history -a "+path {
-			countAppends++
-		}
-	}
-	if countAppends > 1 {
-		twoAppends = true
-	}
-	if twoAppends {
+		// The current command is added in main loop, so we don't add it here
 		for i, cmd := range history {
-			if cmd == "history -a "+path {
-				indexOfLastAppend = i
-				break
-			}
+			fmt.Fprintf(outputWriter, "  %d  %s\n", i, cmd)
 		}
-	}
-
-	toAppendSlice := make([]string, 0)
-	toAppendSlice = history[indexOfLastAppend+1:]
-	err := os.MkdirAll(filepath.Dir(path), 0755)
-	if err != nil {
-		fmt.Printf("Error creating intermediate directories for history file: %v\n", err)
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0755)
-	if err != nil {
-		fmt.Printf("Error opening file for appending history commands to: %v\n", err)
-		return
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
-	for _, cmd := range toAppendSlice {
-		w.WriteString(cmd + string('\n'))
-	}
-	err = w.Flush()
-	if err != nil {
-		fmt.Printf("Error flushing bytes to file: %v\n", err)
-		return
 	}
 }
 
 func parseOutputRedirect(input string) (string, string, string, string) {
 	stdOutRedirectPattern := `(?:^|\s)1?>(?:\s*"([^"]+)"|\s*'([^']+)'|\s*([^\s>]+))`
 	stdOutAppendPattern := `(?:^|\s)1?>>(?:\s*"([^"]+)"|\s*'([^']+)'|\s*([^\s>]+))`
-	stdErrRedirectPattern := `(?:^|\s)2{1}>(?:\s*"([^"]+)"|\s*'([^']+)'|\s*([^\s>]+))`
-	stdErrAppendPattern := `(?:^|\s)2{1}>>(?:\s*"([^"]+)"|\s*'([^']+)'|\s*([^\s>]+))`
+	stdErrRedirectPattern := `(?:^|\s)2>(?:\s*"([^"]+)"|\s*'([^']+)'|\s*([^\s>]+))`
+	stdErrAppendPattern := `(?:^|\s)2>>(?:\s*"([^"]+)"|\s*'([^']+)'|\s*([^\s>]+))`
 
 	stdOutReg := regexp.MustCompile(stdOutRedirectPattern)
 	stdErrReg := regexp.MustCompile(stdErrRedirectPattern)
@@ -766,16 +605,16 @@ func parseOutputRedirect(input string) (string, string, string, string) {
 	stdErrRes := ""
 	stdOutAppendRes := ""
 	stdErrAppendRes := ""
-	if stdOutMatch != nil {
+	if len(stdOutMatch) > 1 {
 		stdOutRes = stdOutMatch[1] + stdOutMatch[2] + stdOutMatch[3]
 	}
-	if stdErrMatch != nil {
+	if len(stdErrMatch) > 1 {
 		stdErrRes = stdErrMatch[1] + stdErrMatch[2] + stdErrMatch[3]
 	}
-	if stdOutAppendMatch != nil {
+	if len(stdOutAppendMatch) > 1 {
 		stdOutAppendRes = stdOutAppendMatch[1] + stdOutAppendMatch[2] + stdOutAppendMatch[3]
 	}
-	if stdErrAppendMatch != nil {
+	if len(stdErrAppendMatch) > 1 {
 		stdErrAppendRes = stdErrAppendMatch[1] + stdErrAppendMatch[2] + stdErrAppendMatch[3]
 	}
 	return stdOutRes, stdErrRes, stdOutAppendRes, stdErrAppendRes
@@ -783,19 +622,11 @@ func parseOutputRedirect(input string) (string, string, string, string) {
 }
 
 func removeRedirection(input string) string {
-	stdOutRedirectPattern := `(?:^|\s)1?>(?:\s*"([^"]+)"|\s*'([^']+)'|\s*([^\s>]+))`
-	stdOutAppendPattern := `(?:^|\s)1?>>(?:\s*"([^"]+)"|\s*'([^']+)'|\s*([^\s>]+))`
-	stdErrRedirectPattern := `(?:^|\s)2{1}>(?:\s*"([^"]+)"|\s*'([^']+)'|\s*([^\s>]+))`
-	stdErrAppendPattern := `(?:^|\s)2{1}>>(?:\s*"([^"]+)"|\s*'([^']+)'|\s*([^\s>]+))`
+	stdOutRedirectPattern := `\s*1?>?>\s*(?:"[^"]*"|'[^']*'|[^\s]+)`
+	stdErrRedirectPattern := `\s*2>>?\s*(?:"[^"]*"|'[^']*'|[^\s]+)`
 
-	stdOutReg := regexp.MustCompile(stdOutRedirectPattern)
-	stdErrReg := regexp.MustCompile(stdErrRedirectPattern)
-	stdOutAppendReg := regexp.MustCompile(stdOutAppendPattern)
-	stdErrAppendReg := regexp.MustCompile(stdErrAppendPattern)
+	res := regexp.MustCompile(stdErrRedirectPattern).ReplaceAllString(input, "")
+	res = regexp.MustCompile(stdOutRedirectPattern).ReplaceAllString(res, "")
 
-	res := stdOutReg.ReplaceAllString(input, "")
-	res = stdErrReg.ReplaceAllString(res, "")
-	res = stdOutAppendReg.ReplaceAllString(res, "")
-	res = stdErrAppendReg.ReplaceAllString(res, "")
 	return res
 }
