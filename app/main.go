@@ -17,6 +17,12 @@ var COMMANDS = []string{
 	"cd",
 }
 
+type nopCloser struct {
+	io.Writer
+}
+
+func (nopCloser) Close() error { return nil }
+
 func parseCommand(command string) []string {
 	var args []string
 	var currentArg strings.Builder
@@ -82,38 +88,32 @@ func exit(args []string) {
 	os.Exit(0)
 }
 
-func handleEmptyStderrRedirect(stderrFile string) {
-	if stderrFile != "" {
-		file, err := os.Create(stderrFile)
-		if err == nil {
-			file.Close()
-		}
-	}
-}
-
-func getStdoutWriter(stdoutFile string, append bool) (io.WriteCloser, error) {
-	if stdoutFile != "" {
+func getWriter(filename string, append bool, defaultWriter io.Writer) (io.WriteCloser, error) {
+	if filename != "" {
 		flags := os.O_WRONLY | os.O_CREATE
 		if append {
 			flags |= os.O_APPEND
 		} else {
 			flags |= os.O_TRUNC
 		}
-		return os.OpenFile(stdoutFile, flags, 0644)
+		return os.OpenFile(filename, flags, 0644)
 	}
-	return &nopCloser{os.Stdout}, nil
+	return &nopCloser{defaultWriter}, nil
 }
 
-type nopCloser struct {
-	io.Writer
+func handleEmptyStderrRedirect(stderrFile string, appendStderr bool) {
+	if stderrFile != "" {
+		writer, err := getWriter(stderrFile, appendStderr, os.Stderr)
+		if err == nil {
+			writer.Close()
+		}
+	}
 }
 
-func (nopCloser) Close() error { return nil }
+func echo(args []string, stdoutFile string, stderrFile string, appendStdout bool, appendStderr bool) {
+	handleEmptyStderrRedirect(stderrFile, appendStderr)
 
-func echo(args []string, stdoutFile string, stderrFile string, appendStdout bool) {
-	handleEmptyStderrRedirect(stderrFile)
-
-	writer, err := getStdoutWriter(stdoutFile, appendStdout)
+	writer, err := getWriter(stdoutFile, appendStdout, os.Stdout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
 		return
@@ -123,10 +123,10 @@ func echo(args []string, stdoutFile string, stderrFile string, appendStdout bool
 	fmt.Fprintln(writer, strings.Join(args, " "))
 }
 
-func pwd(args []string, stdoutFile string, stderrFile string, appendStdout bool) {
-	handleEmptyStderrRedirect(stderrFile)
+func pwd(args []string, stdoutFile string, stderrFile string, appendStdout bool, appendStderr bool) {
+	handleEmptyStderrRedirect(stderrFile, appendStderr)
 
-	writer, err := getStdoutWriter(stdoutFile, appendStdout)
+	writer, err := getWriter(stdoutFile, appendStdout, os.Stdout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
 		return
@@ -141,7 +141,7 @@ func pwd(args []string, stdoutFile string, stderrFile string, appendStdout bool)
 	fmt.Fprintln(writer, dir)
 }
 
-func changeDirectory(args []string, stderrFile string) {
+func changeDirectory(args []string, stderrFile string, appendStderr bool) {
 	var targetDir string
 	var err error
 
@@ -155,16 +155,12 @@ func changeDirectory(args []string, stderrFile string) {
 		targetDir = args[0]
 	}
 
-	var errWriter io.Writer = os.Stderr
-	if stderrFile != "" {
-		file, err := os.Create(stderrFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating redirection file: %v\n", err)
-			return
-		}
-		defer file.Close()
-		errWriter = file
+	errWriter, err := getWriter(stderrFile, appendStderr, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating redirection file: %v\n", err)
+		return
 	}
+	defer errWriter.Close()
 
 	err = os.Chdir(targetDir)
 	if err != nil {
@@ -181,14 +177,14 @@ func isCommandInSlice(a string, list []string) bool {
 	return false
 }
 
-func typeBuiltIn(args []string, stdoutFile string, stderrFile string, appendStdout bool) {
-	handleEmptyStderrRedirect(stderrFile)
+func typeBuiltIn(args []string, stdoutFile string, stderrFile string, appendStdout bool, appendStderr bool) {
+	handleEmptyStderrRedirect(stderrFile, appendStderr)
 
 	if len(args) == 0 {
 		return
 	}
 
-	writer, err := getStdoutWriter(stdoutFile, appendStdout)
+	writer, err := getWriter(stdoutFile, appendStdout, os.Stdout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
 		return
@@ -209,24 +205,20 @@ func typeBuiltIn(args []string, stdoutFile string, stderrFile string, appendStdo
 	}
 }
 
-func invalidCommand(programName string, stderrFile string) {
-	var errWriter io.Writer = os.Stderr
-	if stderrFile != "" {
-		file, err := os.Create(stderrFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating redirection file: %v\n", err)
-			return
-		}
-		defer file.Close()
-		errWriter = file
+func invalidCommand(programName string, stderrFile string, appendStderr bool) {
+	errWriter, err := getWriter(stderrFile, appendStderr, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating redirection file: %v\n", err)
+		return
 	}
+	defer errWriter.Close()
 	fmt.Fprintf(errWriter, "%s: command not found\n", programName)
 }
 
-func executeExternalCommand(programName string, args []string, stdoutFile string, stderrFile string, appendStdout bool) {
+func executeExternalCommand(programName string, args []string, stdoutFile string, stderrFile string, appendStdout bool, appendStderr bool) {
 	path, err := exec.LookPath(programName)
 	if err != nil {
-		invalidCommand(programName, stderrFile)
+		invalidCommand(programName, stderrFile, appendStderr)
 		return
 	}
 
@@ -235,35 +227,21 @@ func executeExternalCommand(programName string, args []string, stdoutFile string
 		Args: append([]string{programName}, args...),
 	}
 
-	if stdoutFile != "" {
-		flags := os.O_WRONLY | os.O_CREATE
-		if appendStdout {
-			flags |= os.O_APPEND
-		} else {
-			flags |= os.O_TRUNC
-		}
-		file, err := os.OpenFile(stdoutFile, flags, 0644)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating redirection file: %v\n", err)
-			return
-		}
-		defer file.Close()
-		cmd.Stdout = file
-	} else {
-		cmd.Stdout = os.Stdout
+	stdoutWriter, err := getWriter(stdoutFile, appendStdout, os.Stdout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating redirection file: %v\n", err)
+		return
 	}
+	defer stdoutWriter.Close()
+	cmd.Stdout = stdoutWriter
 
-	if stderrFile != "" {
-		file, err := os.Create(stderrFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating redirection file: %v\n", err)
-			return
-		}
-		defer file.Close()
-		cmd.Stderr = file
-	} else {
-		cmd.Stderr = os.Stderr
+	stderrWriter, err := getWriter(stderrFile, appendStderr, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating redirection file: %v\n", err)
+		return
 	}
+	defer stderrWriter.Close()
+	cmd.Stderr = stderrWriter
 
 	cmd.Run()
 }
@@ -286,7 +264,7 @@ func main() {
 		}
 
 		var stdoutFile, stderrFile string
-		var appendStdout bool
+		var appendStdout, appendStderr bool
 		cleanCommandWords := []string{}
 		i := 0
 		for i < len(commandWords) {
@@ -310,6 +288,14 @@ func main() {
 			} else if word == "2>" {
 				if i+1 < len(commandWords) {
 					stderrFile = commandWords[i+1]
+					appendStderr = false
+					i += 2
+					isRedirect = true
+				}
+			} else if word == "2>>" {
+				if i+1 < len(commandWords) {
+					stderrFile = commandWords[i+1]
+					appendStderr = true
 					i += 2
 					isRedirect = true
 				}
@@ -323,15 +309,15 @@ func main() {
 
 		if len(cleanCommandWords) == 0 {
 			if stdoutFile != "" {
-				writer, err := getStdoutWriter(stdoutFile, appendStdout)
+				writer, err := getWriter(stdoutFile, appendStdout, os.Stdout)
 				if err == nil {
 					writer.Close()
 				}
 			}
 			if stderrFile != "" {
-				file, err := os.Create(stderrFile)
+				writer, err := getWriter(stderrFile, appendStderr, os.Stderr)
 				if err == nil {
-					file.Close()
+					writer.Close()
 				}
 			}
 			continue
@@ -341,15 +327,15 @@ func main() {
 		case "exit":
 			exit(cleanCommandWords[1:])
 		case "echo":
-			echo(cleanCommandWords[1:], stdoutFile, stderrFile, appendStdout)
+			echo(cleanCommandWords[1:], stdoutFile, stderrFile, appendStdout, appendStderr)
 		case "pwd":
-			pwd(cleanCommandWords[1:], stdoutFile, stderrFile, appendStdout)
+			pwd(cleanCommandWords[1:], stdoutFile, stderrFile, appendStdout, appendStderr)
 		case "cd":
-			changeDirectory(cleanCommandWords[1:], stderrFile)
+			changeDirectory(cleanCommandWords[1:], stderrFile, appendStderr)
 		case "type":
-			typeBuiltIn(cleanCommandWords[1:], stdoutFile, stderrFile, appendStdout)
+			typeBuiltIn(cleanCommandWords[1:], stdoutFile, stderrFile, appendStdout, appendStderr)
 		default:
-			executeExternalCommand(cleanCommandWords[0], cleanCommandWords[1:], stdoutFile, stderrFile, appendStdout)
+			executeExternalCommand(cleanCommandWords[0], cleanCommandWords[1:], stdoutFile, stderrFile, appendStdout, appendStderr)
 		}
 	}
 }
