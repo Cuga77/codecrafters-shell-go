@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -108,6 +107,7 @@ func extractCommand(dir string) ([]string, error) {
 	}
 	return res, err
 }
+
 func ReadDir(PATH string) []string {
 	path_split := strings.Split(PATH, ":")
 	res := make([]string, 0)
@@ -357,7 +357,7 @@ const (
 )
 
 var builtins = map[string]struct{}{
-	EXIT: {}, ECHO: {}, TYPE: {}, PWD: {}, CD: {},
+	EXIT: {}, ECHO: {}, TYPE: {}, PWD: {}, CD: {}, HISTORY: {},
 }
 
 func isBuiltin(cmd string) bool {
@@ -560,7 +560,7 @@ func main() {
 	execCmd := ReadDir(path)
 
 	completer := &CustomCompleter{
-		words: []string{"echo", "exit"},
+		words: []string{"echo", "exit", "pwd", "cd", "type", "history"},
 	}
 
 	var listener customlistner = &CustomListener{}
@@ -591,14 +591,19 @@ func main() {
 	for {
 		cmd, err := l.Readline()
 		if err != nil {
+			if err == io.EOF {
+				break
+			}
 			fmt.Fprintln(os.Stderr, "Error reading input:", err)
 			os.Exit(1)
 		}
 
-		cmd = strings.TrimSuffix(cmd, "\n")
+		cmd = strings.TrimSpace(cmd)
 		if cmd == "" {
 			continue
 		}
+
+		historycmd.push(cmd, false)
 
 		if strings.Contains(cmd, "|") {
 			executePipeline(cmd)
@@ -614,15 +619,14 @@ func main() {
 		createFile(Stdoutfile.fileName)
 		createFile(Stderrfile.fileName)
 
-		historycmd.push(command+" "+strings.Join(args, " "), false)
-
-		availableCommand := [4]string{"echo", "exit", "type", "history"}
-
 		switch command {
 		case ECHO:
 			writeOutput(strings.Join(args, " "), Stdoutfile, true)
 		case "exit":
 			if len(args) == 0 {
+				if os.Getenv("HISTFILE") != "" {
+					writeHistory(os.Getenv("HISTFILE"), historycmd, false)
+				}
 				os.Exit(0)
 			}
 			exit_code, err := strconv.ParseInt(args[0], 10, 64)
@@ -630,11 +634,24 @@ func main() {
 				os.Exit(1)
 			}
 			if os.Getenv("HISTFILE") != "" {
-				writeHistory(os.Getenv("HISTFILE"), historycmd, true)
+				writeHistory(os.Getenv("HISTFILE"), historycmd, false)
 			}
 			os.Exit(int(exit_code))
+		case PWD:
+			dir, err := os.Getwd()
+			if err != nil {
+				errorMsg := fmt.Sprintf("pwd: %s\n", err)
+				if Stderrfile.fileName != "" {
+					writeOutput(errorMsg, Stderrfile, false)
+				} else {
+					fmt.Fprint(os.Stderr, errorMsg)
+				}
+				continue
+			}
+			writeOutput(dir, Stdoutfile, true)
 		case CD:
 			var dir string
+			var targetArg string
 			if len(args) == 0 {
 				var err error
 				dir, err = os.UserHomeDir()
@@ -647,8 +664,10 @@ func main() {
 					}
 					continue
 				}
+				targetArg = dir
 			} else {
 				dir = args[0]
+				targetArg = dir
 				if dir == "~" {
 					home, err := os.UserHomeDir()
 					if err != nil {
@@ -665,7 +684,7 @@ func main() {
 			}
 
 			if err := os.Chdir(dir); err != nil {
-				errorMsg := fmt.Sprintf("cd: %s: No such file or directory\n", args[0])
+				errorMsg := fmt.Sprintf("cd: %s: No such file or directory\n", targetArg)
 				if Stderrfile.fileName != "" {
 					writeOutput(errorMsg, Stderrfile, false)
 				} else {
@@ -709,12 +728,11 @@ func main() {
 				writeOutput(temp+" "+historycmd.cmd, Stdoutfile, true)
 			}
 		case TYPE:
-			slice := availableCommand[:]
 			if len(args) < 1 {
 				continue
 			}
 			target := args[0]
-			if slices.Contains(slice, target) {
+			if isBuiltin(target) {
 				writeOutput(target+" is a shell builtin", Stdoutfile, true)
 			} else {
 				foundCommand = false
