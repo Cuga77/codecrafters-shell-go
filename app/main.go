@@ -28,9 +28,17 @@ func (nopCloser) Close() error { return nil }
 type shellCompleter struct{}
 
 func (s *shellCompleter) Do(line []rune, pos int) ([][]rune, int) {
-	prefix := string(line[:pos])
+	start := pos - 1
+	for start >= 0 {
+		if line[start] == ' ' {
+			break
+		}
+		start--
+	}
+	start++
+	prefix := string(line[start:pos])
 
-	if strings.Contains(prefix, " ") {
+	if strings.Contains(string(line[:start]), " ") {
 		return nil, 0
 	}
 
@@ -63,16 +71,23 @@ func (s *shellCompleter) Do(line []rune, pos int) ([][]rune, int) {
 		}
 	}
 
-	if len(suggestions) > 0 {
-		var completions [][]rune
+	if len(suggestions) == 0 {
+		fmt.Print("\x07")
+		return nil, 0
+	}
+
+	var completions [][]rune
+	if len(suggestions) == 1 {
+		for s := range suggestions {
+			completions = append(completions, []rune(s+" "))
+		}
+	} else {
 		for s := range suggestions {
 			completions = append(completions, []rune(s))
 		}
-		return completions, len(prefix)
 	}
 
-	fmt.Print("\x07")
-	return nil, 0
+	return completions, len(prefix)
 }
 
 func parseCommand(command string) []string {
