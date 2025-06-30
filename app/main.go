@@ -1,397 +1,507 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
 	"github.com/chzyer/readline"
 )
 
-const (
-	StateNormal = iota
-	StateInSingleQuote
-	StateInDoubleQuote
-	StateEscape
-	StateInDoubleQuoteEscape
-)
+type Redirection struct {
+	File   string
+	Append bool
+}
 
-const TERMINAL_BELL = "\x07"
+func parseRedirections(args []string) (cleanArgs []string, stdoutRedir, stderrRedir *Redirection) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case ">", "1>":
+			if i+1 < len(args) {
+				stdoutRedir = &Redirection{File: args[i+1], Append: false}
+				i++
+			}
+		case ">>", "1>>":
+			if i+1 < len(args) {
+				stdoutRedir = &Redirection{File: args[i+1], Append: true}
+				i++
+			}
+		case "2>":
+			if i+1 < len(args) {
+				stderrRedir = &Redirection{File: args[i+1], Append: false}
+				i++
+			}
+		case "2>>":
+			if i+1 < len(args) {
+				stderrRedir = &Redirection{File: args[i+1], Append: true}
+				i++
+			}
+		default:
+			cleanArgs = append(cleanArgs, args[i])
+		}
+	}
+	return
+}
 
-func parse(line string) ([]string, error) {
-	var parts []string
-	var currentPart strings.Builder
-	state := StateNormal
-	line = strings.TrimSpace(line)
+type Output struct {
+	Stdout *os.File
+	Stderr *os.File
+}
 
-	for _, r := range line {
-		switch state {
-		case StateNormal:
-			if r == '\'' {
-				state = StateInSingleQuote
-			} else if r == '"' {
-				state = StateInDoubleQuote
-			} else if r == '\\' {
-				state = StateEscape
-			} else if unicode.IsSpace(r) {
-				if currentPart.Len() > 0 {
-					parts = append(parts, currentPart.String())
-					currentPart.Reset()
+func setupOutput(stdoutRedir, stderrRedir *Redirection) (*Output, error) {
+	out := &Output{
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+	}
+
+	if stdoutRedir != nil {
+		flag := os.O_CREATE | os.O_WRONLY
+		if stdoutRedir.Append {
+			flag |= os.O_APPEND
+		} else {
+			flag |= os.O_TRUNC
+		}
+		f, err := os.OpenFile(stdoutRedir.File, flag, 0644)
+		if err != nil {
+			return nil, err
+		}
+		out.Stdout = f
+	}
+
+	if stderrRedir != nil {
+		flag := os.O_CREATE | os.O_WRONLY
+		if stderrRedir.Append {
+			flag |= os.O_APPEND
+		} else {
+			flag |= os.O_TRUNC
+		}
+		f, err := os.OpenFile(stderrRedir.File, flag, 0644)
+		if err != nil {
+			if out.Stdout != os.Stdout {
+				out.Stdout.Close()
+			}
+			return nil, err
+		}
+		out.Stderr = f
+	}
+
+	return out, nil
+}
+
+func findExecutable(command string, paths []string) string {
+	for _, dir := range paths {
+		fullPath := filepath.Join(dir, command)
+		if info, err := os.Stat(fullPath); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+			return fullPath
+		}
+	}
+	return ""
+}
+
+func separateCommandArgs(input string) (string, []string) {
+	var args []string
+	var current strings.Builder
+	inSingleQuote := false
+	inDoubleQuote := false
+	i := 0
+
+	for i < len(input) {
+		ch := input[i]
+
+		switch ch {
+		case '\'':
+			if !inDoubleQuote {
+				inSingleQuote = !inSingleQuote
+			} else {
+				current.WriteByte(ch)
+			}
+			i++
+		case '"':
+			if !inSingleQuote {
+				inDoubleQuote = !inDoubleQuote
+			} else {
+				current.WriteByte(ch)
+			}
+			i++
+		case '\\':
+			if i+1 >= len(input) {
+				current.WriteByte('\\')
+				i++
+				break
+			}
+			next := input[i+1]
+			if inSingleQuote {
+				current.WriteByte('\\')
+				current.WriteByte(next)
+				i += 2
+			} else if inDoubleQuote {
+				if next == '"' || next == '\\' || next == '$' || next == '`' {
+					current.WriteByte(next)
+				} else {
+					current.WriteByte('\\')
+					current.WriteByte(next)
 				}
+				i += 2
 			} else {
-				currentPart.WriteRune(r)
+				current.WriteByte(next)
+				i += 2
 			}
-		case StateInSingleQuote:
-			if r == '\'' {
-				state = StateNormal
+		case ' ', '\t':
+			if inSingleQuote || inDoubleQuote {
+				current.WriteByte(ch)
+				i++
 			} else {
-				currentPart.WriteRune(r)
+				if current.Len() > 0 {
+					args = append(args, current.String())
+					current.Reset()
+				}
+				for i < len(input) && unicode.IsSpace(rune(input[i])) {
+					i++
+				}
 			}
-		case StateInDoubleQuote:
-			if r == '"' {
-				state = StateNormal
-			} else if r == '\\' {
-				state = StateInDoubleQuoteEscape
-			} else {
-				currentPart.WriteRune(r)
-			}
-		case StateInDoubleQuoteEscape:
-			if r == '"' || r == '\\' || r == '$' || r == '`' {
-				currentPart.WriteRune(r)
-			} else {
-				currentPart.WriteRune('\\')
-				currentPart.WriteRune(r)
-			}
-			state = StateInDoubleQuote
-		case StateEscape:
-			currentPart.WriteRune(r)
-			state = StateNormal
+		default:
+			current.WriteByte(ch)
+			i++
+		}
+	}
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+
+	if len(args) == 0 {
+		return "", []string{}
+	}
+
+	return args[0], args[1:]
+}
+
+func completeCommands(prefix string) [][]rune {
+	var result [][]rune
+	seen := make(map[string]bool)
+
+	for _, b := range builtin {
+		if strings.HasPrefix(b, prefix) && !seen[b] {
+			seen[b] = true
+			result = append(result, []rune(b))
 		}
 	}
 
-	if currentPart.Len() > 0 {
-		parts = append(parts, currentPart.String())
-	}
-
-	if state == StateInSingleQuote {
-		return nil, errors.New("unclosed single quote")
-	}
-	if state == StateInDoubleQuote || state == StateInDoubleQuoteEscape {
-		return nil, errors.New("unclosed double quote")
-	}
-	if state == StateEscape {
-		return nil, errors.New("unterminated escape sequence")
-	}
-	return parts, nil
-}
-
-var builtin = map[string]bool{
-	"exit": true, "echo": true, "type": true, "pwd": true, "cd": true,
-}
-
-type customCompleter struct {
-	innerCompleter readline.AutoCompleter
-	lastLine       []rune
-	lastMatches    [][]rune
-}
-
-func buildAllCommands() []readline.PrefixCompleterInterface {
-	var items []readline.PrefixCompleterInterface
-	commandSet := make(map[string]bool)
-
-	for cmd := range builtin {
-		commandSet[cmd] = true
-	}
-
-	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+	for _, dir := range paths {
 		files, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
-
-		for _, file := range files {
-			if file.IsDir() {
-				continue
+		for _, f := range files {
+			name := f.Name()
+			if strings.HasPrefix(name, prefix) && !seen[name] {
+				seen[name] = true
+				result = append(result, []rune(name))
 			}
-			info, err := file.Info()
-			if err != nil {
-				continue
-			}
+		}
+	}
+	return result
+}
 
-			if info.Mode().Perm()&0111 != 0 {
-				commandSet[file.Name()] = true
+func completeDirs(prefix string) [][]rune {
+	files, _ := os.ReadDir(".")
+	var result [][]rune
+	for _, f := range files {
+		if f.IsDir() && strings.HasPrefix(f.Name(), prefix) {
+			suffix := f.Name()[len(prefix):]
+			result = append(result, []rune(suffix))
+		}
+	}
+	return result
+}
+
+func findCommandMatches(prefix string) []string {
+	var matches []string
+	seen := make(map[string]bool)
+
+	for _, b := range builtin {
+		if strings.HasPrefix(b, prefix) && !seen[b] {
+			seen[b] = true
+			matches = append(matches, b)
+		}
+	}
+
+	for _, dir := range paths {
+		files, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			name := f.Name()
+			if strings.HasPrefix(name, prefix) && !seen[name] {
+				seen[name] = true
+				matches = append(matches, name)
 			}
 		}
 	}
 
-	for cmd := range commandSet {
-		items = append(items, readline.PcItem(cmd))
-	}
-	return items
+	sort.Strings(matches)
+	return matches
 }
 
-func (c *customCompleter) Do(line []rune, pos int) ([][]rune, int) {
-	suggestions, n := c.innerCompleter.Do(line, pos)
+type AutoCompleter struct {
+	lastPrefix string
+	tabCount   int
+}
 
-	if len(suggestions) == 0 {
-		c.lastLine = nil
-		c.lastMatches = nil
-		fmt.Print(TERMINAL_BELL)
-		return nil, 0
+func (a *AutoCompleter) Do(line []rune, pos int) ([][]rune, int) {
+	start := pos
+	for start > 0 && !unicode.IsSpace(line[start-1]) {
+		start--
 	}
+	current := string(line[start:pos])
 
-	if len(suggestions) == 1 {
-		c.lastLine = nil
-		c.lastMatches = nil
-		return suggestions, n
-	}
+	// === COMMAND COMPLETION ===
+	if start == 0 {
+		matches := findCommandMatches(current)
 
-	if equal(c.lastLine, line) {
-		fmt.Println()
-		var stringMatches []string
-		for _, r := range c.lastMatches {
-			stringMatches = append(stringMatches, string(r))
+		if len(matches) == 0 {
+			fmt.Fprint(os.Stderr, "\a")
+			a.lastPrefix = ""
+			a.tabCount = 0
+			return nil, pos
 		}
-		fmt.Println(strings.Join(stringMatches, "  "))
-		c.lastLine = nil
-		c.lastMatches = nil
-		return nil, 0
-	} else {
-		c.lastLine = make([]rune, len(line))
-		copy(c.lastLine, line)
-		c.lastMatches = suggestions
-		fmt.Print(TERMINAL_BELL)
-		return nil, 0
-	}
-}
 
-func equal(a, b []rune) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i, v := range a {
-		if v != b[i] {
-			return false
+		// One match → complete immediately
+		if len(matches) == 1 {
+			a.lastPrefix = ""
+			a.tabCount = 0
+			return [][]rune{[]rune(matches[0][len(current):] + " ")}, pos
+		}
+
+		// Multiple matches
+		if current == a.lastPrefix {
+			a.tabCount++
+		} else {
+			a.tabCount = 1
+			a.lastPrefix = current
+		}
+
+		if a.tabCount == 1 {
+			// First tab on multi-match → bell
+			fmt.Fprint(os.Stderr, "\a")
+			return nil, pos
+		} else {
+			// Second tab → show all matches and reprint prompt
+			fmt.Println()
+			for _, match := range matches {
+				fmt.Print(match + "  ")
+			}
+			fmt.Println()
+			fmt.Print("$ " + current)
+			a.tabCount = 0 // reset after printing
+			return nil, pos
 		}
 	}
-	return true
+
+	// === ARG COMPLETION (directories) ===
+	suggestions := completeDirs(current)
+	for i := range suggestions {
+		full := string(suggestions[i])
+		if strings.HasPrefix(full, current) {
+			suggestions[i] = []rune(full[len(current):])
+		}
+	}
+
+	// Reset state for non-command tabbing
+	a.lastPrefix = ""
+	a.tabCount = 0
+
+	return suggestions, pos
 }
 
+var COMMANDS map[string]func([]string, *Output)
+var builtin []string
+var paths = strings.Split(os.Getenv("PATH"), ":")
+
+func init() {
+	COMMANDS = map[string]func([]string, *Output){
+		"exit": exit,
+		"echo": echo,
+		"type": type_,
+		"pwd":  pwd,
+		"cd":   cd,
+	}
+	builtin = []string{
+		"exit",
+		"echo",
+		"type",
+		"pwd",
+		"cd",
+	}
+}
 func main() {
-	allCommandItems := buildAllCommands()
-	prefixCompleter := readline.NewPrefixCompleter(allCommandItems...)
-	completer := &customCompleter{
-		innerCompleter: prefixCompleter,
-	}
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          "$ ",
-		AutoComplete:    completer,
+		HistoryFile:     "/tmp/readline.tmp",
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",
+		AutoComplete:    &AutoCompleter{},
 	})
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 	defer rl.Close()
-
 	for {
-		command, err := rl.Readline()
-
-		if err == readline.ErrInterrupt {
-			if command == "" {
-				break
-			} else {
-				continue
-			}
-		} else if err == io.EOF {
+		line, err := rl.Readline()
+		if err != nil {
 			break
 		}
-		cleancommand := strings.TrimSpace(command)
-		if cleancommand == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		parts, err := parse(cleancommand)
+		command, args := separateCommandArgs(strings.TrimSpace(line))
+		args, stdoutRedir, stderrRedir := parseRedirections(args)
+
+		out, err := setupOutput(stdoutRedir, stderrRedir)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			continue
-		}
-		if len(parts) == 0 {
+			fmt.Fprintln(os.Stderr, "Redirection error:", err)
 			continue
 		}
 
-		var outputFile string
-		var appendFile string
-		var errorFile string
-		var appendErrorFile string
-		var commandParts []string
-
-		i := 0
-		for i < len(parts) {
-			part := parts[i]
-			switch part {
-			case ">", "1>":
-				if i+1 < len(parts) {
-					outputFile = parts[i+1]
-					i += 2
-				} else {
-					i++
-				}
-			case ">>", "1>>":
-				if i+1 < len(parts) {
-					appendFile = parts[i+1]
-					i += 2
-				} else {
-					i++
-				}
-			case "2>":
-				if i+1 < len(parts) {
-					errorFile = parts[i+1]
-					i += 2
-				} else {
-					i++
-				}
-			case "2>>":
-				if i+1 < len(parts) {
-					appendErrorFile = parts[i+1]
-					i += 2
-				} else {
-					i++
-				}
-			default:
-				commandParts = append(commandParts, part)
-				i++
+		if builtinFunc, ok := COMMANDS[command]; ok {
+			builtinFunc(args, out)
+		} else {
+			if !execute(command, args, out) {
+				fmt.Fprintln(os.Stderr, command+": command not found")
 			}
-		}
-
-		if len(commandParts) == 0 {
-			continue
-		}
-		newcommand := commandParts[0]
-		args := commandParts[1:]
-
-		switch newcommand {
-		case "exit":
-			os.Exit(0)
-		case "echo":
-			textToPrint := strings.Join(args, " ") + "\n"
-
-			if appendErrorFile != "" {
-				file, err := os.OpenFile(appendErrorFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-				if err == nil {
-					file.Close()
-				}
-			} else if errorFile != "" {
-				file, err := os.Create(errorFile)
-				if err == nil {
-					file.Close()
-				}
-			}
-
-			if appendFile != "" {
-				file, err := os.OpenFile(appendFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-				if err == nil {
-					file.WriteString(textToPrint)
-					file.Close()
-				}
-			} else if outputFile != "" {
-				os.WriteFile(outputFile, []byte(textToPrint), 0644)
-			} else {
-				fmt.Fprint(os.Stdout, textToPrint)
-			}
-			continue
-
-		case "type":
-			if len(args) == 0 {
-				continue
-			}
-			if _, isbuiltin := builtin[args[0]]; isbuiltin {
-				fmt.Printf("%s is a shell builtin\n", args[0])
-			} else {
-				if path, err := exec.LookPath(args[0]); err != nil {
-					fmt.Printf("%s: not found\n", args[0])
-				} else {
-					fmt.Printf("%s is %s\n", args[0], path)
-				}
-			}
-		case "pwd":
-			if dir, err := os.Getwd(); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-			} else {
-				fmt.Println(dir)
-			}
-		case "cd":
-			var targetdir string
-			if len(args) == 0 || args[0] == "~" {
-				if homeDir, err := os.UserHomeDir(); err != nil {
-					fmt.Fprintf(os.Stderr, "cd: could not get home directory: %v\n", err)
-					continue
-				} else {
-					targetdir = homeDir
-				}
-			} else {
-				targetdir = args[0]
-			}
-			if err := os.Chdir(targetdir); err != nil {
-				fmt.Printf("cd: %s: No such file or directory\n", targetdir)
-			}
-		default:
-			path, err := exec.LookPath(newcommand)
-			if err != nil {
-				fmt.Printf("%s: command not found\n", newcommand)
-				continue
-			}
-
-			cmd := &exec.Cmd{
-				Path: path,
-				Args: append([]string{newcommand}, args...),
-			}
-
-			if appendFile != "" {
-				file, err := os.OpenFile(appendFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "error opening file:", err)
-					continue
-				}
-				defer file.Close()
-				cmd.Stdout = file
-			} else if outputFile != "" {
-				file, err := os.Create(outputFile)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "error creating file:", err)
-					continue
-				}
-				defer file.Close()
-				cmd.Stdout = file
-			} else {
-				cmd.Stdout = os.Stdout
-			}
-
-			if appendErrorFile != "" {
-				file, err := os.OpenFile(appendErrorFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "error opening file:", err)
-					continue
-				}
-				defer file.Close()
-				cmd.Stderr = file
-			} else if errorFile != "" {
-				file, err := os.Create(errorFile)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "error creating file:", err)
-					continue
-				}
-				defer file.Close()
-				cmd.Stderr = file
-			} else {
-				cmd.Stderr = os.Stderr
-			}
-
-			cmd.Run()
 		}
 	}
+}
+
+func exit(args []string, out *Output) {
+	status := 0
+	if len(args) > 1 {
+		fmt.Fprintln(out.Stderr, "Error: expected zero or one argument")
+		return
+	}
+	if len(args) == 1 {
+		var err error
+		status, err = strconv.Atoi(args[0])
+		if err != nil {
+			fmt.Fprintln(out.Stderr, "Invalid number:", err)
+			return
+		}
+	}
+	os.Exit(status)
+}
+
+func echo(args []string, out *Output) {
+	_, err := fmt.Fprintln(out.Stdout, strings.Join(args, " "))
+	if err != nil {
+		fmt.Fprintln(out.Stderr, "Error writing to stdout:", err)
+	}
+}
+
+func type_(args []string, out *Output) {
+
+	command := args[0]
+	var outputText string
+	if _, exists := COMMANDS[command]; exists {
+		outputText = args[0] + " is a shell builtin"
+	} else {
+		fullPath := findExecutable(command, paths)
+		if fullPath != "" {
+			outputText = command + " is " + fullPath
+		} else {
+			outputText = args[0] + ": not found"
+		}
+	}
+	_, err := fmt.Fprintln(out.Stdout, outputText)
+	if err != nil {
+		fmt.Fprintln(out.Stderr, "Error writing to stdout:", err)
+	}
+}
+
+func pwd(args []string, out *Output) {
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(out.Stderr, "Error writing to stdout:", err)
+	} else {
+		fmt.Fprintln(out.Stdout, dir)
+	}
+}
+
+var lastDir string
+
+func cd(args []string, out *Output) {
+	var targetDir string
+
+	currentDir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(out.Stderr, "cd: failed to get current directory:", err)
+		return
+	}
+
+	if len(args) == 0 {
+		home := os.Getenv("HOME")
+		if home == "" {
+			fmt.Fprintln(out.Stderr, "cd: HOME not set")
+			return
+		}
+		targetDir = home
+	} else if args[0] == "-" {
+		if lastDir == "" {
+			fmt.Fprintln(out.Stderr, "cd: OLDPWD not set")
+			return
+		}
+		targetDir = lastDir
+		fmt.Fprintln(out.Stdout, targetDir)
+	} else if strings.HasPrefix(args[0], "~") {
+		home := os.Getenv("HOME")
+		if home == "" {
+			fmt.Fprintln(out.Stderr, "cd: HOME not set")
+			return
+		}
+		targetDir = filepath.Join(home, strings.TrimPrefix(args[0], "~"))
+	} else {
+		targetDir = args[0]
+	}
+
+	if err := os.Chdir(targetDir); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(out.Stderr, "cd: %s: No such file or directory\n", targetDir)
+		} else {
+			fmt.Fprintf(out.Stderr, "cd: %s: %s\n", targetDir, err.Error())
+		}
+		return
+	}
+
+	lastDir = currentDir
+}
+
+func execute(command string, args []string, out *Output) bool {
+	fullPath := findExecutable(command, paths)
+	if fullPath == "" {
+		return false
+	}
+
+	cmd := &exec.Cmd{
+		Path:   fullPath,
+		Args:   append([]string{command}, args...),
+		Stdin:  os.Stdin,
+		Stdout: out.Stdout,
+		Stderr: out.Stderr,
+	}
+
+	cmd.Run()
+
+	if out.Stdout != os.Stdout {
+		out.Stdout.Close()
+	}
+	if out.Stderr != os.Stderr {
+		out.Stderr.Close()
+	}
+
+	return true
 }
