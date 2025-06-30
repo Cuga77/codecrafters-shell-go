@@ -82,32 +82,17 @@ func exit(args []string) {
 	os.Exit(0)
 }
 
-func echo(args []string, stdoutFile string, stderrFile string) {
+func echo(args []string, stdoutFile string) {
 	var writer io.Writer = os.Stdout
-	var fileToClose *os.File
-
-	if stderrFile != "" {
-		file, err := os.Create(stderrFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
-			return
-		}
-		writer = file
-		fileToClose = file
-	} else if stdoutFile != "" {
+	if stdoutFile != "" {
 		file, err := os.Create(stdoutFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
 			return
 		}
+		defer file.Close()
 		writer = file
-		fileToClose = file
 	}
-
-	if fileToClose != nil {
-		defer fileToClose.Close()
-	}
-
 	fmt.Fprintln(writer, strings.Join(args, " "))
 }
 
@@ -308,7 +293,7 @@ func main() {
 		case "exit":
 			exit(cleanCommandWords[1:])
 		case "echo":
-			echo(cleanCommandWords[1:], stdoutFile, stderrFile)
+			echo(cleanCommandWords[1:], stdoutFile)
 		case "pwd":
 			pwd(cleanCommandWords[1:], stdoutFile)
 		case "cd":
