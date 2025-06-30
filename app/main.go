@@ -2,240 +2,543 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"unicode"
 
-	"github.com/chzyer/readline"
+	"golang.org/x/term"
 )
 
-type Redirection struct {
-	File   string
-	Append bool
+// Key constants (raw terminal mode input)
+const (
+	KEY_TAB       = 9
+	KEY_ENTER     = 13
+	KEY_NEWLINE   = 10
+	KEY_BACKSPACE = 127
+	KEY_CTRL_C    = 3
+	KEY_ESC       = 27
+)
+
+var builtinCommands = []string{
+	"exit",
+	"echo",
+	"pwd",
+	"cd",
+	"type",
+	"sort",
+	"history",
 }
 
-func parseRedirections(args []string) (cleanArgs []string, stdoutRedir, stderrRedir *Redirection) {
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case ">", "1>":
-			if i+1 < len(args) {
-				stdoutRedir = &Redirection{File: args[i+1], Append: false}
-				i++
-			}
-		case ">>", "1>>":
-			if i+1 < len(args) {
-				stdoutRedir = &Redirection{File: args[i+1], Append: true}
-				i++
-			}
-		case "2>":
-			if i+1 < len(args) {
-				stderrRedir = &Redirection{File: args[i+1], Append: false}
-				i++
-			}
-		case "2>>":
-			if i+1 < len(args) {
-				stderrRedir = &Redirection{File: args[i+1], Append: true}
-				i++
-			}
-		default:
-			cleanArgs = append(cleanArgs, args[i])
-		}
-	}
-	return
-}
+// Autocomplete cache for external commands
+var autocompleteCache = make(map[string][]string)
+var tabPressState = make(map[string]int)
+var cacheOrder []string
 
-type Output struct {
-	Stdout *os.File
-	Stderr *os.File
-}
+const maxCacheSize = 20
 
-func setupOutput(stdoutRedir, stderrRedir *Redirection) (*Output, error) {
-	out := &Output{
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
-	}
+// Ensures gofmt doesn't remove the "fmt" import in stage 1 (feel free to remove this!)
+var _ = fmt.Fprint
 
-	if stdoutRedir != nil {
-		flag := os.O_CREATE | os.O_WRONLY
-		if stdoutRedir.Append {
-			flag |= os.O_APPEND
-		} else {
-			flag |= os.O_TRUNC
-		}
-		f, err := os.OpenFile(stdoutRedir.File, flag, 0644)
-		if err != nil {
-			return nil, err
-		}
-		out.Stdout = f
-	}
-
-	if stderrRedir != nil {
-		flag := os.O_CREATE | os.O_WRONLY
-		if stderrRedir.Append {
-			flag |= os.O_APPEND
-		} else {
-			flag |= os.O_TRUNC
-		}
-		f, err := os.OpenFile(stderrRedir.File, flag, 0644)
-		if err != nil {
-			if out.Stdout != os.Stdout {
-				out.Stdout.Close()
-			}
-			return nil, err
-		}
-		out.Stderr = f
-	}
-
-	return out, nil
-}
-
-func findExecutable(command string, paths []string) string {
-	for _, dir := range paths {
-		fullPath := filepath.Join(dir, command)
-		if info, err := os.Stat(fullPath); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
-			return fullPath
-		}
-	}
-	return ""
-}
-
-func separateCommandArgs(input string) (string, []string) {
-	var args []string
+func parseTokens(input string) ([]string, error) {
+	var tokens []string
 	var current strings.Builder
 	inSingleQuote := false
 	inDoubleQuote := false
-	i := 0
+	escapeNext := false
 
-	for i < len(input) {
+	for i := 0; i < len(input); i++ {
 		ch := input[i]
 
+		// Handle single quotes — completely literal
+		if inSingleQuote {
+			if ch == '\'' {
+				inSingleQuote = false
+			} else {
+				current.WriteByte(ch)
+			}
+			continue
+		}
+
+		// Handle double quotes with limited escape support
+		if inDoubleQuote {
+			if escapeNext {
+				switch ch {
+				case '\\', '"', '$', '\n':
+					current.WriteByte(ch)
+				default:
+					current.WriteByte('\\') // preserve the backslash
+					current.WriteByte(ch)
+				}
+				escapeNext = false
+				continue
+			}
+
+			if ch == '\\' {
+				escapeNext = true
+				continue
+			}
+			if ch == '"' {
+				inDoubleQuote = false
+			} else {
+				current.WriteByte(ch)
+			}
+			continue
+		}
+
+		// Outside quotes
+		if escapeNext {
+			current.WriteByte(ch)
+			escapeNext = false
+			continue
+		}
+
 		switch ch {
-		case '\'':
-			if !inDoubleQuote {
-				inSingleQuote = !inSingleQuote
-			} else {
-				current.WriteByte(ch)
-			}
-			i++
-		case '"':
-			if !inSingleQuote {
-				inDoubleQuote = !inDoubleQuote
-			} else {
-				current.WriteByte(ch)
-			}
-			i++
 		case '\\':
-			if i+1 >= len(input) {
-				current.WriteByte('\\')
-				i++
-				break
-			}
-			next := input[i+1]
-			if inSingleQuote {
-				current.WriteByte('\\')
-				current.WriteByte(next)
-				i += 2
-			} else if inDoubleQuote {
-				if next == '"' || next == '\\' || next == '$' || next == '`' {
-					current.WriteByte(next)
-				} else {
-					current.WriteByte('\\')
-					current.WriteByte(next)
-				}
-				i += 2
-			} else {
-				current.WriteByte(next)
-				i += 2
-			}
+			escapeNext = true
+		case '\'':
+			inSingleQuote = true
+		case '"':
+			inDoubleQuote = true
 		case ' ', '\t':
-			if inSingleQuote || inDoubleQuote {
-				current.WriteByte(ch)
-				i++
-			} else {
-				if current.Len() > 0 {
-					args = append(args, current.String())
-					current.Reset()
-				}
-				for i < len(input) && unicode.IsSpace(rune(input[i])) {
-					i++
-				}
+			if current.Len() > 0 {
+				tokens = append(tokens, current.String())
+				current.Reset()
 			}
 		default:
 			current.WriteByte(ch)
-			i++
 		}
+	}
+
+	if escapeNext {
+		return nil, fmt.Errorf("unexpected end of input after backslash")
+	}
+	if inSingleQuote || inDoubleQuote {
+		return nil, fmt.Errorf("unclosed quote")
 	}
 	if current.Len() > 0 {
-		args = append(args, current.String())
+		tokens = append(tokens, current.String())
 	}
-
-	if len(args) == 0 {
-		return "", []string{}
-	}
-
-	return args[0], args[1:]
+	return tokens, nil
 }
 
-func completeCommands(prefix string) [][]rune {
-	var result [][]rune
-	seen := make(map[string]bool)
+func handleLine(lineInput string) {
+	// Parse tokens + handle quoting and escaping
+	tokens, err := parseTokens(strings.TrimSpace(lineInput))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Parse error:", err)
+		return
+	}
 
-	for _, b := range builtin {
-		if strings.HasPrefix(b, prefix) && !seen[b] {
-			seen[b] = true
-			result = append(result, []rune(b))
+	if len(tokens) == 1 && tokens[0] == "" {
+		return
+	}
+
+	// split tokens into commands on every "|"
+	var cmds [][]string
+	start := 0
+	for i, tk := range tokens {
+		if tk == "|" {
+			if i == start {
+				fmt.Fprintln(os.Stderr, "syntax error: empty command")
+				return
+			}
+			cmds = append(cmds, tokens[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(tokens) {
+		cmds = append(cmds, tokens[start:])
+	}
+	if len(cmds) == 0 {
+		return // nothing to run
+	}
+	if len(cmds) == 1 {
+		// no pipes
+		handleCommand(cmds[0], os.Stdin, os.Stdout, os.Stderr)
+	} else {
+		runMultiPipeline(cmds)
+	}
+}
+
+func runMultiPipeline(cmds [][]string) {
+	n := len(cmds)
+	// prepare n-1 in-memory pipes
+	readers := make([]*io.PipeReader, n-1)
+	writers := make([]*io.PipeWriter, n-1)
+	for i := 0; i < n-1; i++ {
+		readers[i], writers[i] = io.Pipe()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+
+	for i, argv := range cmds {
+		// determine stdin/stdout for this segment
+		var in io.Reader = os.Stdin
+		var out io.Writer = os.Stdout
+
+		if i > 0 {
+			in = readers[i-1]
+		}
+		if i < n-1 {
+			out = writers[i]
+		}
+
+		go func(args []string, r io.Reader, w io.Writer) {
+			defer wg.Done()
+			handleCommand(args, r, w, os.Stderr)
+
+			// Close write-end → signals EOF downstream
+			if pw, ok := w.(*io.PipeWriter); ok {
+				pw.Close()
+			}
+
+			// Close read-end  → signals EOF/upstream writer
+			if pr, ok := r.(*io.PipeReader); ok {
+				pr.Close()
+			}
+		}(argv, in, out)
+	}
+
+	wg.Wait()
+}
+
+func handleCommand(tokens []string, inputReader io.Reader, outputWriter io.Writer, errorWriter io.Writer) {
+	command := tokens[0]
+
+	var outputFile, errorFile *os.File
+
+	for i := 0; i < len(tokens); i++ {
+		switch tokens[i] {
+		case ">", "1>":
+			if i+1 >= len(tokens) {
+				fmt.Fprintln(os.Stderr, "syntax error: expected filename after", tokens[i])
+				return
+			}
+			var err error
+			outputFile, err = os.Create(tokens[i+1])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "cannot open file for writing:", err)
+				return
+			}
+			outputWriter = outputFile
+			tokens = append(tokens[:i], tokens[i+2:]...) // remove redirect tokens
+			i -= 1                                       // step back to recheck this index
+		case ">>", "1>>":
+			if i+1 >= len(tokens) {
+				fmt.Fprintln(os.Stderr, "syntax error: expected filename after", tokens[i])
+				return
+			}
+			var err error
+			outputFile, err = os.OpenFile(tokens[i+1], os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "cannot open file for appending:", err)
+				return
+			}
+			outputWriter = outputFile
+			tokens = append(tokens[:i], tokens[i+2:]...) // remove redirect tokens
+			i -= 1                                       // step back to recheck this index
+		case "2>":
+			if i+1 >= len(tokens) {
+				fmt.Fprintln(os.Stderr, "syntax error: expected filename after", tokens[i])
+				return
+			}
+			var err error
+			errorFile, err = os.Create(tokens[i+1])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "cannot open file for writing:", err)
+				return
+			}
+			errorWriter = errorFile
+			tokens = append(tokens[:i], tokens[i+2:]...) // remove redirect tokens
+			i -= 1                                       // step back
+		case "2>>":
+			if i+1 >= len(tokens) {
+				fmt.Fprintln(os.Stderr, "syntax error: expected filename after", tokens[i])
+				return
+			}
+			var err error
+			errorFile, err = os.OpenFile(tokens[i+1], os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "cannot open error file for appending:", err)
+				return
+			}
+			errorWriter = errorFile
+			tokens = append(tokens[:i], tokens[i+2:]...) // remove redirect tokens
+			i -= 1                                       // step back
 		}
 	}
 
-	for _, dir := range paths {
-		files, err := os.ReadDir(dir)
-		if err != nil {
-			continue
+	switch command {
+	case "exit":
+		if len(tokens) == 1 {
+			os.Exit(0)
 		}
-		for _, f := range files {
-			name := f.Name()
-			if strings.HasPrefix(name, prefix) && !seen[name] {
-				seen[name] = true
-				result = append(result, []rune(name))
+		if exitCode, err := strconv.ParseInt(tokens[1], 10, 64); err == nil && tokens[0] == "exit" {
+			os.Exit(int(exitCode))
+		}
+	case "echo":
+		fmt.Fprintln(outputWriter, strings.Join(tokens[1:], " "))
+		if outputFile != nil {
+			if cerr := outputFile.Close(); cerr != nil {
+				fmt.Fprintln(os.Stderr, "error closing output file:", cerr)
+			}
+		}
+		if errorFile != nil {
+			if cerr := errorFile.Close(); cerr != nil {
+				fmt.Fprintln(os.Stderr, "error closing error file:", cerr)
+			}
+		}
+	case "pwd":
+		dir, err := os.Getwd()
+		if err != nil {
+		}
+		fmt.Fprintln(outputWriter, dir)
+		if outputFile != nil {
+			if cerr := outputFile.Close(); cerr != nil {
+				fmt.Fprintln(os.Stderr, "error closing output file:", cerr)
+			}
+		}
+		if errorFile != nil {
+			if cerr := errorFile.Close(); cerr != nil {
+				fmt.Fprintln(os.Stderr, "error closing error file:", cerr)
+			}
+		}
+	case "cd":
+		// This approach works for relative and absolute paths
+		dir := ""
+		switch len(tokens[1:]) {
+		case 0:
+			dir = os.Getenv("HOME")
+		case 1:
+			dir = tokens[1]
+			if dir[0] == '~' && len(dir) > 1 {
+				dir = os.Getenv("HOME") + dir[1:]
+			} else if dir[0] == '~' {
+				dir = os.Getenv("HOME")
+			}
+		default:
+			fmt.Fprintln(errorWriter, "cd: too many arguments")
+			return
+		}
+
+		err := os.Chdir(dir)
+		if err != nil {
+			fmt.Println("cd: " + tokens[1] + ": No such file or directory")
+		}
+	case "type":
+		if len(tokens) == 1 {
+			fmt.Fprintln(os.Stdout, "type: missing argument")
+		} else {
+			command := tokens[1]
+
+			if slices.Contains(builtinCommands, command) {
+				fmt.Fprintln(outputWriter, command+" is a shell builtin")
+			} else if commandPath, err := exec.LookPath(command); err == nil {
+				fmt.Fprintln(outputWriter, command+" is "+commandPath)
+			} else {
+				fmt.Fprintln(outputWriter, command+": not found")
+			}
+
+			if outputFile != nil {
+				if cerr := outputFile.Close(); cerr != nil {
+					fmt.Fprintln(os.Stderr, "error closing output file:", cerr)
+				}
+			}
+			if errorFile != nil {
+				if cerr := errorFile.Close(); cerr != nil {
+					fmt.Fprintln(os.Stderr, "error closing error file:", cerr)
+				}
+			}
+		}
+	default:
+		_, err := exec.LookPath(command)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: command not found\n\r", command)
+			return
+		} else {
+			cmd := exec.Command(command, tokens[1:]...)
+			cmd.Stdout = outputWriter
+			cmd.Stderr = errorWriter
+			cmd.Stdin = inputReader
+
+			err := cmd.Run()
+
+			if outputFile != nil {
+				if cerr := outputFile.Close(); cerr != nil {
+					fmt.Fprintln(os.Stderr, "error closing output file:", cerr)
+				}
+			}
+			if errorFile != nil {
+				if cerr := errorFile.Close(); cerr != nil {
+					fmt.Fprintln(os.Stderr, "error closing error file:", cerr)
+				}
+			}
+
+			if err != nil {
+				//fmt.Fprintln(os.Stderr, err)
 			}
 		}
 	}
-	return result
 }
 
-func findCommandMatches(prefix string) []string {
+func handleAutocomplete(input []rune, cursorPos int) ([]rune, int) {
+	prefix := string(input[:cursorPos])
+	matchesMap := make(map[string]bool)
 	var matches []string
-	seen := make(map[string]bool)
 
-	for _, b := range builtin {
-		if strings.HasPrefix(b, prefix) && !seen[b] {
-			seen[b] = true
-			matches = append(matches, b)
+	for _, cmd := range builtinCommands {
+		if strings.HasPrefix(cmd, prefix) && !matchesMap[cmd] {
+			matches = append(matches, cmd)
+			matchesMap[cmd] = true
 		}
 	}
 
-	for _, dir := range paths {
-		files, err := os.ReadDir(dir)
-		if err != nil {
-			continue
+	var externalMatches []string
+	// External command matches with debounce
+	if cached, ok := autocompleteCache[prefix]; ok {
+		externalMatches = cached
+	} else {
+		externalMatches, _ = findMatchingExecutables(prefix)
+		sort.Strings(externalMatches)
+		addToAutocompleteCache(prefix, externalMatches)
+	}
+
+	for _, cmd := range externalMatches {
+		if !matchesMap[cmd] {
+			matches = append(matches, cmd)
+			matchesMap[cmd] = true
 		}
-		for _, f := range files {
-			name := f.Name()
-			if strings.HasPrefix(name, prefix) && !seen[name] {
-				seen[name] = true
-				matches = append(matches, name)
+	}
+
+	switch len(matches) {
+	case 0:
+		// No match: do nothing, make bell sound
+		fmt.Fprintf(os.Stdout, "\a")
+		return input, cursorPos
+
+	case 1:
+		// Single match: insert remaining characters
+		match := matches[0]
+		remaining := match[cursorPos:]
+
+		// Insert the remaining characters of the match
+		for _, r := range remaining {
+			input = append(input[:cursorPos], append([]rune{r}, input[cursorPos:]...)...)
+			cursorPos++
+		}
+
+		// Insert a trailing space
+		input = append(input[:cursorPos], append([]rune{' '}, input[cursorPos:]...)...)
+		cursorPos++
+
+		// Redraw the rest of the input
+		restAfter := string(input[cursorPos:])
+		fmt.Print(remaining + " " + restAfter)
+
+		// Move cursor back to the correct position
+		for i := 0; i < len(restAfter); i++ {
+			fmt.Print("\x1b[D")
+		}
+
+	default:
+		// Multiple matches
+		lcp := longestCommonPrefix(matches)
+		if len(lcp) > len(prefix) {
+			// Progressive match found
+			remaining := lcp[len(prefix):]
+			for _, r := range remaining {
+				input = append(input[:cursorPos], append([]rune{r}, input[cursorPos:]...)...)
+				cursorPos++
+			}
+
+			rest := string(input[cursorPos:])
+			fmt.Print(remaining + rest)
+			for i := 0; i < len(rest); i++ {
+				fmt.Print("\x1b[D")
+			}
+		} else {
+			// No progressive match found
+			if tabPressState[prefix] == 0 {
+				// First TAB press: ring bell and record state
+				fmt.Print("\a")
+				tabPressState[prefix] = 1
+			} else {
+				// Print suggestions on a new line
+				fmt.Print("\n\r") // clean new line for suggestions
+				for _, match := range matches {
+					fmt.Print(match + "  ")
+				}
+				fmt.Print("\n\r") // another newline to separate from prompt
+
+				// Redraw the prompt and user input
+				fmt.Printf("\r$ %s", string(input))
+
+				// Move cursor to correct position
+				for i := 0; i < len(input)-cursorPos; i++ {
+					fmt.Print("\x1b[D")
+				}
+				// Remove the state from memory
+				delete(tabPressState, prefix)
 			}
 		}
 	}
 
-	sort.Strings(matches)
-	return matches
+	return input, cursorPos
+}
+
+func findMatchingExecutables(prefix string) ([]string, error) {
+	pathEnv := os.Getenv("PATH")
+	dirs := strings.Split(pathEnv, ":")
+	matches := []string{}
+
+	seen := make(map[string]bool) // avoid duplicate names from different dirs
+
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue // skip unreadable directories
+		}
+
+		for _, entry := range entries {
+			name := entry.Name()
+			if !strings.HasPrefix(name, prefix) || entry.IsDir() {
+				continue
+			}
+
+			// Check executable bit
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if info.Mode()&0111 == 0 { // Not executable
+				continue
+			}
+
+			if !seen[name] {
+				matches = append(matches, name)
+				seen[name] = true
+			}
+		}
+	}
+
+	return matches, nil
+}
+
+func addToAutocompleteCache(prefix string, results []string) {
+	if len(autocompleteCache) >= maxCacheSize {
+		// Remove the oldest prefix from cache
+		oldest := cacheOrder[0]
+		cacheOrder = cacheOrder[1:]
+		delete(autocompleteCache, oldest)
+	}
+	autocompleteCache[prefix] = results
+	cacheOrder = append(cacheOrder, prefix)
 }
 
 func longestCommonPrefix(strs []string) string {
@@ -245,386 +548,185 @@ func longestCommonPrefix(strs []string) string {
 	prefix := strs[0]
 	for _, s := range strs[1:] {
 		for !strings.HasPrefix(s, prefix) {
-			prefix = prefix[:len(prefix)-1]
-			if prefix == "" {
+			if len(prefix) == 0 {
 				return ""
 			}
+			prefix = prefix[:len(prefix)-1]
 		}
 	}
 	return prefix
 }
 
-type AutoCompleter struct {
-	lastLine string
-	lastPos  int
-	tabCount int
-}
-
-func (a *AutoCompleter) Do(line []rune, pos int) ([][]rune, int) {
-	start := pos
-	for start > 0 && !unicode.IsSpace(line[start-1]) {
-		start--
-	}
-	current := string(line[start:pos])
-
-	if current != a.lastLine || pos != a.lastPos {
-		a.lastLine = current
-		a.lastPos = pos
-		a.tabCount = 0
-	}
-
-	matches := findCommandMatches(current)
-	if len(matches) == 0 {
-		fmt.Fprint(os.Stderr, "\a")
-		a.tabCount = 0
-		return nil, pos
-	}
-
-	if len(matches) == 1 {
-		match := matches[0]
-		suffix := match[len(current):] + " "
-		a.tabCount = 0
-		return [][]rune{[]rune(suffix)}, pos
-	}
-
-	lcp := longestCommonPrefix(matches)
-	if lcp == current {
-		a.tabCount++
-		if a.tabCount == 1 {
-			fmt.Fprint(os.Stderr, "\a")
-		} else {
-			fmt.Println()
-			for _, m := range matches {
-				fmt.Print(m + "  ")
-			}
-			fmt.Println()
-			fmt.Print("$ " + current)
-			a.tabCount = 0
-		}
-		return nil, pos
-	}
-
-	suffix := lcp[len(current):]
-	a.lastLine = lcp
-	a.tabCount = 0
-	return [][]rune{[]rune(suffix)}, pos
-}
-
-func runBuiltin(cmd string, args []string, out *Output, in *os.File) {
-	// Temporarily override stdin/stdout/stderr
-	oldStdin := os.Stdin
-	oldStdout := os.Stdout
-	oldStderr := os.Stderr
-
-	if in != nil {
-		os.Stdin = in
-	}
-	if out.Stdout != nil {
-		os.Stdout = out.Stdout
-	}
-	if out.Stderr != nil {
-		os.Stderr = out.Stderr
-	}
-
-	defer func() {
-		os.Stdin = oldStdin
-		os.Stdout = oldStdout
-		os.Stderr = oldStderr
-	}()
-
-	if builtinFunc, ok := COMMANDS[cmd]; ok {
-		builtinFunc(args, out)
-	}
-}
-
-func executePipeline(line string) bool {
-	parts := strings.Split(line, "|")
-	commands := make([][]string, 0, len(parts))
-
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		cmd, args := separateCommandArgs(part)
-		args, _, _ = parseRedirections(args)
-		commands = append(commands, append([]string{cmd}, args...))
-	}
-
-	numCmds := len(commands)
-	var pipes []struct{ r, w *os.File }
-
-	for i := 0; i < numCmds-1; i++ {
-		r, w, err := os.Pipe()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "pipe error:", err)
-			return false
-		}
-		pipes = append(pipes, struct{ r, w *os.File }{r, w})
-	}
-
-	var processes []*exec.Cmd
-	var wg sync.WaitGroup
-
-	for i, cmdArgs := range commands {
-		cmdName := cmdArgs[0]
-		args := cmdArgs[1:]
-
-		var stdin *os.File = os.Stdin
-		var stdout *os.File = os.Stdout
-
-		if i > 0 {
-			stdin = pipes[i-1].r
-		}
-		if i < numCmds-1 {
-			stdout = pipes[i].w
-		}
-
-		if _, isBuiltin := COMMANDS[cmdName]; isBuiltin {
-			// Built-in: run in goroutine
-			r := stdin
-			w := stdout
-
-			wg.Add(1)
-			go func(name string, args []string, in, out *os.File) {
-				defer wg.Done()
-				runBuiltin(name, args, &Output{
-					Stdout: out,
-					Stderr: os.Stderr,
-				}, in)
-				if in != os.Stdin {
-					in.Close()
-				}
-				if out != os.Stdout {
-					out.Close()
-				}
-			}(cmdName, args, r, w)
-
-		} else {
-			fullPath := findExecutable(cmdName, paths)
-			if fullPath == "" {
-				fmt.Fprintln(os.Stderr, cmdName+": command not found")
-				return false
-			}
-
-			cmd := exec.Command(fullPath, args...)
-			cmd.Stdin = stdin
-			cmd.Stdout = stdout
-			cmd.Stderr = os.Stderr
-
-			if err := cmd.Start(); err != nil {
-				fmt.Fprintln(os.Stderr, "start error:", err)
-				return false
-			}
-			processes = append(processes, cmd)
-		}
-	}
-
-	// Close all pipe ends in the parent process
-	for _, pipe := range pipes {
-		pipe.r.Close()
-		pipe.w.Close()
-	}
-
-	// Wait for external commands
-	for _, cmd := range processes {
-		cmd.Wait()
-	}
-
-	// Wait for builtin goroutines
-	wg.Wait()
-
-	return true
-}
-
-var COMMANDS map[string]func([]string, *Output)
-var builtin []string
-var paths = strings.Split(os.Getenv("PATH"), ":")
-
-func init() {
-	COMMANDS = map[string]func([]string, *Output){
-		"exit": exit,
-		"echo": echo,
-		"type": type_,
-		"pwd":  pwd,
-		"cd":   cd,
-	}
-	builtin = []string{
-		"exit",
-		"echo",
-		"type",
-		"pwd",
-		"cd",
-	}
-}
 func main() {
-	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          "$ ",
-		HistoryFile:     "/tmp/readline.tmp",
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
-		AutoComplete:    &AutoCompleter{},
-	})
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, "Failed to enter raw mode:", err)
+		os.Exit(1)
 	}
-	defer rl.Close()
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+	fmt.Print("$ ")
+	var input []rune
+	var cursorPos int
+
+	var history []string
+	const maxHistory = 5
+	var historyIndex = -1
+
 	for {
-		line, err := rl.Readline()
-		if err != nil {
-			break
-		}
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if strings.Contains(line, "|") {
-			ok := executePipeline(line)
-			if !ok {
-				fmt.Fprintln(os.Stderr, "pipeline execution failed")
-			}
-		} else {
-			command, args := separateCommandArgs(line)
-			args, stdoutRedir, stderrRedir := parseRedirections(args)
-			out, err := setupOutput(stdoutRedir, stderrRedir)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "Redirection error:", err)
+		var buf [1]byte
+		os.Stdin.Read(buf[:])
+		ch := buf[0]
+
+		switch ch {
+		case KEY_CTRL_C:
+			fmt.Println("\n\rExiting.\r")
+			term.Restore(int(os.Stdin.Fd()), oldState)
+			os.Exit(0)
+
+		case KEY_ENTER, KEY_NEWLINE:
+			fmt.Print("\n\r")
+			line := string(input)
+
+			if line == "" {
+				// Empty line — just reset and continue
+				input = nil
+				cursorPos = 0
+				fmt.Printf("\r$ ")
 				continue
 			}
 
-			if builtinFunc, ok := COMMANDS[command]; ok {
-				builtinFunc(args, out)
-			} else {
-				if !execute(command, args, out) {
-					fmt.Fprintln(os.Stderr, command+": command not found")
+			term.Restore(int(os.Stdin.Fd()), oldState)
+
+			handleLine(line)
+
+			oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
+
+			// Save to history
+			if strings.TrimSpace(line) != "" {
+				if len(history) >= maxHistory {
+					history = history[1:] // drop oldest
+				}
+				history = append(history, line)
+			}
+			historyIndex = -1 // reset on new input
+
+			input = nil
+			cursorPos = 0
+			fmt.Printf("\r$ ")
+
+		case KEY_BACKSPACE:
+			if cursorPos > 0 {
+				// Remove the character before the cursor
+				input = append(input[:cursorPos-1], input[cursorPos:]...)
+				cursorPos--
+
+				// Redraw the rest of the input from the cursor position
+				rest := string(input[cursorPos:])
+				fmt.Print("\x1b[D")   // Move back to the deleted char
+				fmt.Print(rest + " ") // Print rest and overwrite trailing char
+				// Move cursor back to its proper position
+				for i := 0; i < len(rest)+1; i++ {
+					fmt.Print("\x1b[D")
 				}
 			}
+
+		case KEY_TAB:
+			trimmed := strings.TrimLeft(string(input[:cursorPos]), " \t")
+
+			if len(trimmed) == 0 {
+				// Just insert spaces
+				tabWidth := 4
+				spaces := []rune("    ")
+
+				input = append(input[:cursorPos], append(spaces, input[cursorPos:]...)...)
+				cursorPos += tabWidth
+
+				rest := string(input[cursorPos:])
+				fmt.Print("    " + rest)
+
+				for i := 0; i < len(rest); i++ {
+					fmt.Print("\x1b[D")
+				}
+			} else {
+				// Only pass trimmed prefix, not the entire input
+				input, cursorPos = handleAutocomplete(input, cursorPos)
+			}
+
+		case KEY_ESC:
+			// Read 2 more bytes
+			var seq [2]byte
+			os.Stdin.Read(seq[:])
+
+			if seq[0] == '[' {
+				switch seq[1] {
+				case 'A': // Up arrow
+					if len(history) == 0 {
+						break
+					}
+					if historyIndex < len(history)-1 {
+						historyIndex++
+					}
+
+					// Replace input with history item
+					input = []rune(history[len(history)-1-historyIndex])
+					cursorPos = len(input)
+
+					// Clear line and redraw
+					fmt.Print("\r\033[2K") // clear entire line
+					fmt.Printf("$ %s", string(input))
+				case 'B': // Down arrow
+					if historyIndex <= 0 {
+						historyIndex = -1
+						input = nil
+						cursorPos = 0
+						fmt.Print("\r\033[2K$ ")
+						break
+					}
+
+					historyIndex--
+					input = []rune(history[len(history)-1-historyIndex])
+					cursorPos = len(input)
+
+					fmt.Print("\r\033[2K") // clear line
+					fmt.Printf("$ %s", string(input))
+				case 'C': // Right arrow
+					if cursorPos < len(input) {
+						cursorPos++
+						fmt.Print("\x1b[C")
+					}
+				case 'D': // Left arrow
+					if cursorPos > 0 {
+						cursorPos--
+						fmt.Print("\x1b[D")
+					}
+				}
+			}
+
+		default:
+			chRune := rune(ch)
+
+			// Insert character into input buffer at cursorPos
+			if cursorPos < 0 {
+				cursorPos = 0
+			}
+			if cursorPos > len(input) {
+				cursorPos = len(input)
+			}
+
+			input = append(input[:cursorPos], append([]rune{chRune}, input[cursorPos:]...)...)
+			cursorPos++
+
+			// Redraw from the current cursor position
+			rest := string(input[cursorPos:])
+			fmt.Printf("%c%s", chRune, rest)
+
+			// Move cursor back to logical position
+			for i := 0; i < len(rest); i++ {
+				fmt.Print("\x1b[D")
+			}
 		}
-	}
-}
 
-func exit(args []string, out *Output) {
-	status := 0
-	if len(args) > 1 {
-		fmt.Fprintln(out.Stderr, "Error: expected zero or one argument")
-		return
-	}
-	if len(args) == 1 {
-		var err error
-		status, err = strconv.Atoi(args[0])
-		if err != nil {
-			fmt.Fprintln(out.Stderr, "Invalid number:", err)
-			return
-		}
-	}
-	os.Exit(status)
-}
-
-func echo(args []string, out *Output) {
-	_, err := fmt.Fprintln(out.Stdout, strings.Join(args, " "))
-	if err != nil {
-		fmt.Fprintln(out.Stderr, "Error writing to stdout:", err)
-	}
-}
-
-func type_(args []string, out *Output) {
-
-	command := args[0]
-	var outputText string
-	if _, exists := COMMANDS[command]; exists {
-		outputText = args[0] + " is a shell builtin"
-	} else {
-		fullPath := findExecutable(command, paths)
-		if fullPath != "" {
-			outputText = command + " is " + fullPath
-		} else {
-			outputText = args[0] + ": not found"
-		}
-	}
-	_, err := fmt.Fprintln(out.Stdout, outputText)
-	if err != nil {
-		fmt.Fprintln(out.Stderr, "Error writing to stdout:", err)
-	}
-}
-
-func pwd(args []string, out *Output) {
-	dir, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintln(out.Stderr, "Error writing to stdout:", err)
-	} else {
-		fmt.Fprintln(out.Stdout, dir)
-	}
-}
-
-var lastDir string
-
-func cd(args []string, out *Output) {
-	var targetDir string
-
-	currentDir, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintln(out.Stderr, "cd: failed to get current directory:", err)
-		return
 	}
 
-	if len(args) == 0 {
-		home := os.Getenv("HOME")
-		if home == "" {
-			fmt.Fprintln(out.Stderr, "cd: HOME not set")
-			return
-		}
-		targetDir = home
-	} else if args[0] == "-" {
-		if lastDir == "" {
-			fmt.Fprintln(out.Stderr, "cd: OLDPWD not set")
-			return
-		}
-		targetDir = lastDir
-		fmt.Fprintln(out.Stdout, targetDir)
-	} else if strings.HasPrefix(args[0], "~") {
-		home := os.Getenv("HOME")
-		if home == "" {
-			fmt.Fprintln(out.Stderr, "cd: HOME not set")
-			return
-		}
-		targetDir = filepath.Join(home, strings.TrimPrefix(args[0], "~"))
-	} else {
-		targetDir = args[0]
-	}
-
-	if err := os.Chdir(targetDir); err != nil {
-		if os.IsNotExist(err) {
-			fmt.Fprintf(out.Stderr, "cd: %s: No such file or directory\n", targetDir)
-		} else {
-			fmt.Fprintf(out.Stderr, "cd: %s: %s\n", targetDir, err.Error())
-		}
-		return
-	}
-
-	lastDir = currentDir
-}
-
-func execute(command string, args []string, out *Output) bool {
-	fullPath := findExecutable(command, paths)
-	if fullPath == "" {
-		return false
-	}
-
-	cmd := &exec.Cmd{
-		Path:   fullPath,
-		Args:   append([]string{command}, args...),
-		Stdin:  os.Stdin,
-		Stdout: out.Stdout,
-		Stderr: out.Stderr,
-	}
-
-	cmd.Run()
-
-	if out.Stdout != os.Stdout {
-		out.Stdout.Close()
-	}
-	if out.Stderr != os.Stderr {
-		out.Stderr.Close()
-	}
-
-	return true
 }
