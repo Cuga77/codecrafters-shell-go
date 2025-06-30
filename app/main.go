@@ -738,10 +738,13 @@ func main() {
 				foundCommand = false
 				if len(path) > 0 {
 					for _, exec_path := range path_split {
-						if fileExists(exec_path + "/" + target) {
-							writeOutput(target+" is "+exec_path+"/"+target, Stdoutfile, true)
-							foundCommand = true
-							break
+						fullPath := filepath.Join(exec_path, target)
+						if fileInfo, err := os.Stat(fullPath); err == nil {
+							if !fileInfo.IsDir() && (fileInfo.Mode()&0111 != 0) {
+								writeOutput(target+" is "+fullPath, Stdoutfile, true)
+								foundCommand = true
+								break
+							}
 						}
 					}
 					if !foundCommand {
@@ -754,20 +757,23 @@ func main() {
 		default:
 			foundCommand = false
 			for _, exec_path := range path_split {
-				if fileExists(exec_path + "/" + command) {
-					foundCommand = true
-					exec_cmd := exec.Command(command, args...)
-					exec_cmd.Stderr = &stderr
-					exec_cmd.Stdout = &stdout
-					if err := exec_cmd.Run(); err != nil {
-						writeOutput(stderr.String(), Stderrfile, false)
-						stderr.Reset()
+				fullPath := filepath.Join(exec_path, command)
+				if fileInfo, err := os.Stat(fullPath); err == nil {
+					if !fileInfo.IsDir() && (fileInfo.Mode()&0111 != 0) {
+						foundCommand = true
+						exec_cmd := exec.Command(fullPath, args...)
+						exec_cmd.Stderr = &stderr
+						exec_cmd.Stdout = &stdout
+						if err := exec_cmd.Run(); err != nil {
+							writeOutput(stderr.String(), Stderrfile, false)
+							stderr.Reset()
+						}
+						if stdout.String() != "" {
+							writeOutput(stdout.String(), Stdoutfile, false)
+							stdout.Reset()
+						}
+						break
 					}
-					if stdout.String() != "" {
-						writeOutput(stdout.String(), Stdoutfile, false)
-						stdout.Reset()
-					}
-					break
 				}
 			}
 			if !foundCommand {
