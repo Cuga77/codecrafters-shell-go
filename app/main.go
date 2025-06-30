@@ -97,6 +97,7 @@ var builtin = map[string]bool{
 type customCompleter struct {
 	innerCompleter readline.AutoCompleter
 	lastLine       []rune
+	lastMatches    [][]rune
 }
 
 func buildAllCommands() []readline.PrefixCompleterInterface {
@@ -139,27 +140,31 @@ func (c *customCompleter) Do(line []rune, pos int) ([][]rune, int) {
 
 	if len(suggestions) == 0 {
 		c.lastLine = nil
+		c.lastMatches = nil
 		fmt.Print(TERMINAL_BELL)
 		return nil, 0
 	}
 
 	if len(suggestions) == 1 {
 		c.lastLine = nil
+		c.lastMatches = nil
 		return suggestions, n
 	}
 
 	if equal(c.lastLine, line) {
-		c.lastLine = nil
 		fmt.Println()
 		var stringMatches []string
-		for _, r := range suggestions {
+		for _, r := range c.lastMatches {
 			stringMatches = append(stringMatches, string(r))
 		}
 		fmt.Println(strings.Join(stringMatches, "  "))
+		c.lastLine = nil
+		c.lastMatches = nil
 		return nil, 0
 	} else {
 		c.lastLine = make([]rune, len(line))
 		copy(c.lastLine, line)
+		c.lastMatches = suggestions
 		fmt.Print(TERMINAL_BELL)
 		return nil, 0
 	}
