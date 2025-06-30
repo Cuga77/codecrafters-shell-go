@@ -132,11 +132,38 @@ func executeExternalCommand(programName string, args []string) {
 	}
 }
 
+func parseCommand(command string) []string {
+	var args []string
+	var currentArg strings.Builder
+	inQuotes := false
+
+	for _, r := range command {
+		if r == '\'' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if r == ' ' && !inQuotes {
+			if currentArg.Len() > 0 {
+				args = append(args, currentArg.String())
+				currentArg.Reset()
+			}
+		} else {
+			currentArg.WriteRune(r)
+		}
+	}
+
+	if currentArg.Len() > 0 {
+		args = append(args, currentArg.String())
+	}
+
+	return args
+}
+
 func main() {
 	for {
 		fmt.Fprint(os.Stdout, "$ ")
 		command, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		commandWords := strings.Split(strings.TrimSpace(command), " ")
+		commandWords := parseCommand(strings.TrimSpace(command))
 
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Error reading input:", err)
