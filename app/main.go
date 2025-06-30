@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -236,12 +237,7 @@ func changeDirectory(args []string, stderrFile string, appendStderr bool) {
 }
 
 func isCommandInSlice(a string, list []string) bool {
-	for _, b := range list {
-		if b == a {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, a)
 }
 
 func typeBuiltIn(args []string, stdoutFile string, stderrFile string, appendStdout bool, appendStderr bool) {
