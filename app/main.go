@@ -25,9 +25,9 @@ type nopCloser struct {
 
 func (nopCloser) Close() error { return nil }
 
-type shellCompleter struct{}
+type pathCompleter struct{}
 
-func (s *shellCompleter) Do(line []rune, pos int) ([][]rune, int) {
+func (p *pathCompleter) Do(line []rune, pos int) ([][]rune, int) {
 	start := pos - 1
 	for start >= 0 {
 		if line[start] == ' ' {
@@ -42,52 +42,70 @@ func (s *shellCompleter) Do(line []rune, pos int) ([][]rune, int) {
 		return nil, 0
 	}
 
-	suggestions := make(map[string]struct{})
-
-	for _, cmd := range COMMANDS {
-		if strings.HasPrefix(cmd, prefix) {
-			suggestions[cmd] = struct{}{}
-		}
-	}
-
+	var suggestions [][]rune
 	pathStr := os.Getenv("PATH")
 	paths := filepath.SplitList(pathStr)
+	seen := make(map[string]struct{})
 
 	for _, path := range paths {
 		files, err := os.ReadDir(path)
 		if err != nil {
 			continue
 		}
-
 		for _, file := range files {
-			if !file.IsDir() {
+			name := file.Name()
+			if _, alreadySeen := seen[name]; !file.IsDir() && !alreadySeen && strings.HasPrefix(name, prefix) {
 				info, err := file.Info()
 				if err == nil && info.Mode().Perm()&0111 != 0 {
-					if strings.HasPrefix(file.Name(), prefix) {
-						suggestions[file.Name()] = struct{}{}
-					}
+					suggestions = append(suggestions, []rune(name))
+					seen[name] = struct{}{}
 				}
 			}
 		}
 	}
+	return suggestions, len(prefix)
+}
 
-	if len(suggestions) == 0 {
+type finalCompleter struct {
+	builtinCompleter readline.AutoCompleter
+	pathCompleter    readline.AutoCompleter
+}
+
+func (c *finalCompleter) Do(line []rune, pos int) ([][]rune, int) {
+	builtinSuggestions, builtinLength := c.builtinCompleter.Do(line, pos)
+	pathSuggestions, pathLength := c.pathCompleter.Do(line, pos)
+
+	allSuggestions := make(map[string]struct{})
+	for _, s := range builtinSuggestions {
+		allSuggestions[string(s)] = struct{}{}
+	}
+	for _, s := range pathSuggestions {
+		allSuggestions[string(s)] = struct{}{}
+	}
+
+	if len(allSuggestions) == 0 {
 		fmt.Print("\x07")
 		return nil, 0
 	}
 
+	matchLength := 0
+	if builtinLength > 0 {
+		matchLength = builtinLength
+	} else {
+		matchLength = pathLength
+	}
+
 	var completions [][]rune
-	if len(suggestions) == 1 {
-		for s := range suggestions {
+	if len(allSuggestions) == 1 {
+		for s := range allSuggestions {
 			completions = append(completions, []rune(s+" "))
 		}
 	} else {
-		for s := range suggestions {
+		for s := range allSuggestions {
 			completions = append(completions, []rune(s))
 		}
 	}
-
-	return completions, len(prefix)
+	return completions, matchLength
 }
 
 func parseCommand(command string) []string {
@@ -314,9 +332,22 @@ func executeExternalCommand(programName string, args []string, stdoutFile string
 }
 
 func main() {
+	builtinCompleter := readline.NewPrefixCompleter(
+		readline.PcItem("echo"),
+		readline.PcItem("exit"),
+		readline.PcItem("type"),
+		readline.PcItem("pwd"),
+		readline.PcItem("cd"),
+	)
+
+	final := &finalCompleter{
+		builtinCompleter: builtinCompleter,
+		pathCompleter:    &pathCompleter{},
+	}
+
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:       "$ ",
-		AutoComplete: &shellCompleter{},
+		AutoComplete: final,
 	})
 	if err != nil {
 		panic(err)
