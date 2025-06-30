@@ -249,11 +249,11 @@ func executeExternalCommand(programName string, args []string, stdoutFile string
 
 func main() {
 	completer := readline.NewPrefixCompleter(
-		readline.PcItem("echo "),
-		readline.PcItem("exit "),
-		readline.PcItem("type "),
-		readline.PcItem("pwd "),
-		readline.PcItem("cd "),
+		readline.PcItem("echo"),
+		readline.PcItem("exit"),
+		readline.PcItem("type"),
+		readline.PcItem("pwd"),
+		readline.PcItem("cd"),
 	)
 
 	rl, err := readline.NewEx(&readline.Config{
