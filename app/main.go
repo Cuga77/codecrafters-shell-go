@@ -1,12 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/chzyer/readline"
 )
 
 var COMMANDS = []string{
@@ -247,15 +248,32 @@ func executeExternalCommand(programName string, args []string, stdoutFile string
 }
 
 func main() {
+	completer := readline.NewPrefixCompleter(
+		readline.PcItem("echo"),
+		readline.PcItem("exit"),
+		readline.PcItem("type"),
+		readline.PcItem("pwd"),
+		readline.PcItem("cd"),
+	)
+
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:                      "$ ",
+		AutoComplete:                completer,
+		AutoCompleteAddTailingSpace: true,
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer rl.Close()
+
 	for {
-		fmt.Fprint(os.Stdout, "$ ")
-		input, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				return
-			}
-			fmt.Fprintln(os.Stderr, "Error reading input:", err)
+		input, err := rl.Readline()
+		if err == io.EOF || err == readline.ErrInterrupt {
 			return
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error reading input:", err)
+			continue
 		}
 
 		commandWords := parseCommand(input)
