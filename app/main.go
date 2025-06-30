@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/chzyer/readline"
+	"github.comcom/chzyer/readline"
 )
 
 const (
@@ -92,6 +92,7 @@ var builtin = map[string]bool{
 
 type customCompleter struct {
 	innerCompleter readline.AutoCompleter
+	lastLine       []rune
 }
 
 func buildAllCommands() []readline.PrefixCompleterInterface {
@@ -128,12 +129,44 @@ func buildAllCommands() []readline.PrefixCompleterInterface {
 
 func (c *customCompleter) Do(line []rune, pos int) ([][]rune, int) {
 	suggestions, n := c.innerCompleter.Do(line, pos)
-
 	if len(suggestions) == 0 {
+		c.lastLine = nil
 		fmt.Print(TERMINAL_BELL)
+		return nil, 0
 	}
 
-	return suggestions, n
+	if len(suggestions) == 1 {
+		c.lastLine = nil
+		return suggestions, n
+	}
+
+	if equal(c.lastLine, line) {
+		c.lastLine = nil
+		fmt.Println()
+		var stringMatches []string
+		for _, r := range suggestions {
+			stringMatches = append(stringMatches, string(r))
+		}
+		fmt.Println(strings.Join(stringMatches, "  "))
+		return nil, 0
+	} else {
+		c.lastLine = make([]rune, len(line))
+		copy(c.lastLine, line)
+		fmt.Print(TERMINAL_BELL)
+		return nil, 0
+	}
+}
+
+func equal(a, b []rune) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func main() {
