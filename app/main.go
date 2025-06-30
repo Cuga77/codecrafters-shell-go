@@ -17,6 +17,7 @@ var COMMANDS = []string{
 	"cd",
 	"exit",
 	"type",
+	"pwd",
 }
 
 func contains(command string, commands []string) bool {
@@ -32,6 +33,15 @@ func echo(input []string) {
 		fmt.Println("Not enough arguments for echo")
 	}
 	fmt.Println(strings.Join(input, " "))
+}
+
+func pwd(args []string) {
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
+		return
+	}
+	fmt.Println(dir)
 }
 
 func exit(input []string) {
@@ -120,6 +130,8 @@ func main() {
 			echo(commandWords[1:])
 		case "type":
 			typeBuiltIn(commandWords[1:])
+		case "pwd":
+			pwd(commandWords[1:])
 		default:
 			executeExternalCommand(commandWords[0], commandWords[1:])
 		}
