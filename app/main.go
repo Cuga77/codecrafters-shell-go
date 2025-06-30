@@ -82,7 +82,18 @@ func exit(args []string) {
 	os.Exit(0)
 }
 
-func echo(args []string, stdoutFile string) {
+func handleEmptyStderrRedirect(stderrFile string) {
+	if stderrFile != "" {
+		file, err := os.Create(stderrFile)
+		if err == nil {
+			file.Close()
+		}
+	}
+}
+
+func echo(args []string, stdoutFile string, stderrFile string) {
+	handleEmptyStderrRedirect(stderrFile)
+
 	var writer io.Writer = os.Stdout
 	if stdoutFile != "" {
 		file, err := os.Create(stdoutFile)
@@ -96,7 +107,9 @@ func echo(args []string, stdoutFile string) {
 	fmt.Fprintln(writer, strings.Join(args, " "))
 }
 
-func pwd(args []string, stdoutFile string) {
+func pwd(args []string, stdoutFile string, stderrFile string) {
+	handleEmptyStderrRedirect(stderrFile)
+
 	var writer io.Writer = os.Stdout
 	if stdoutFile != "" {
 		file, err := os.Create(stdoutFile)
@@ -155,7 +168,9 @@ func isCommandInSlice(a string, list []string) bool {
 	return false
 }
 
-func typeBuiltIn(args []string, stdoutFile string) {
+func typeBuiltIn(args []string, stdoutFile string, stderrFile string) {
+	handleEmptyStderrRedirect(stderrFile)
+
 	if len(args) == 0 {
 		return
 	}
@@ -281,10 +296,16 @@ func main() {
 
 		if len(cleanCommandWords) == 0 {
 			if stdoutFile != "" {
-				os.Create(stdoutFile)
+				file, err := os.Create(stdoutFile)
+				if err == nil {
+					file.Close()
+				}
 			}
 			if stderrFile != "" {
-				os.Create(stderrFile)
+				file, err := os.Create(stderrFile)
+				if err == nil {
+					file.Close()
+				}
 			}
 			continue
 		}
@@ -293,13 +314,13 @@ func main() {
 		case "exit":
 			exit(cleanCommandWords[1:])
 		case "echo":
-			echo(cleanCommandWords[1:], stdoutFile)
+			echo(cleanCommandWords[1:], stdoutFile, stderrFile)
 		case "pwd":
-			pwd(cleanCommandWords[1:], stdoutFile)
+			pwd(cleanCommandWords[1:], stdoutFile, stderrFile)
 		case "cd":
 			changeDirectory(cleanCommandWords[1:], stderrFile)
 		case "type":
-			typeBuiltIn(cleanCommandWords[1:], stdoutFile)
+			typeBuiltIn(cleanCommandWords[1:], stdoutFile, stderrFile)
 		default:
 			executeExternalCommand(cleanCommandWords[0], cleanCommandWords[1:], stdoutFile, stderrFile)
 		}
