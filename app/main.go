@@ -25,48 +25,69 @@ type nopCloser struct {
 
 func (nopCloser) Close() error { return nil }
 
-type pathCompleter struct{}
+type shellCompleter struct{}
 
-func (p *pathCompleter) Do(line []rune, pos int) ([][]rune, int) {
-	if strings.ContainsRune(string(line), ' ') {
+func (s *shellCompleter) Do(line []rune, pos int) ([][]rune, int) {
+	start := pos - 1
+	for start >= 0 {
+		if line[start] == ' ' {
+			break
+		}
+		start--
+	}
+	start++
+	prefix := string(line[start:pos])
+
+	if strings.Contains(string(line[:start]), " ") {
 		return nil, 0
 	}
-	prefix := string(line)
 
-	var suggestions [][]rune
+	suggestions := make(map[string]struct{})
+
+	for _, cmd := range COMMANDS {
+		if strings.HasPrefix(cmd, prefix) {
+			suggestions[cmd] = struct{}{}
+		}
+	}
+
 	pathStr := os.Getenv("PATH")
 	paths := filepath.SplitList(pathStr)
-	seen := make(map[string]struct{})
 
 	for _, path := range paths {
 		files, err := os.ReadDir(path)
 		if err != nil {
 			continue
 		}
+
 		for _, file := range files {
-			name := file.Name()
-			if _, alreadySeen := seen[name]; !file.IsDir() && !alreadySeen && strings.HasPrefix(name, prefix) {
+			if !file.IsDir() {
 				info, err := file.Info()
 				if err == nil && info.Mode().Perm()&0111 != 0 {
-					suggestions = append(suggestions, []rune(name))
-					seen[name] = struct{}{}
+					if strings.HasPrefix(file.Name(), prefix) {
+						suggestions[file.Name()] = struct{}{}
+					}
 				}
 			}
 		}
 	}
-	return suggestions, len(prefix)
-}
 
-type bellCompleter struct {
-	completer readline.AutoCompleter
-}
-
-func (c *bellCompleter) Do(line []rune, pos int) ([][]rune, int) {
-	completions, length := c.completer.Do(line, pos)
-	if len(completions) == 0 {
+	if len(suggestions) == 0 {
 		fmt.Print("\x07")
+		return nil, 0
 	}
-	return completions, length
+
+	var completions [][]rune
+	if len(suggestions) == 1 {
+		for s := range suggestions {
+			completions = append(completions, []rune(s+" "))
+		}
+	} else {
+		for s := range suggestions {
+			completions = append(completions, []rune(s))
+		}
+	}
+
+	return completions, len(prefix)
 }
 
 func parseCommand(command string) []string {
@@ -293,26 +314,9 @@ func executeExternalCommand(programName string, args []string, stdoutFile string
 }
 
 func main() {
-	builtinCompleter := readline.NewPrefixCompleter(
-		readline.PcItem("echo"),
-		readline.PcItem("exit"),
-		readline.PcItem("type"),
-		readline.PcItem("pwd"),
-		readline.PcItem("cd"),
-	)
-
-	masterCompleter := readline.NewPrefixCompleter(
-		builtinCompleter,
-		&pathCompleter{},
-	)
-
-	finalCompleter := &bellCompleter{
-		completer: masterCompleter,
-	}
-
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:       "$ ",
-		AutoComplete: finalCompleter,
+		AutoComplete: &shellCompleter{},
 	})
 	if err != nil {
 		panic(err)
