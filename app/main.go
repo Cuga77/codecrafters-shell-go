@@ -18,14 +18,11 @@ import (
 	"github.com/chzyer/readline"
 )
 
-// Ensures gofmt doesn't remove the "fmt" import in stage 1 (feel free to remove this!)
 var _ = fmt.Fprint
 var tabCounter int
 
-// CustomCompleter implements readline.AutoCompleter
 type CustomCompleter struct {
-	words []string
-
+	words         []string
 	tabSuggestion []string
 	prefix        string
 }
@@ -35,7 +32,6 @@ func commonPrefix(strs []string) string {
 		return ""
 	}
 	sort.Strings(strs)
-	//fmt.Println(strs)
 	first := strs[0]
 	last := strs[len(strs)-1]
 	minLen := min(len(first), len(last))
@@ -54,8 +50,6 @@ func min(a, b int) int {
 	return b
 }
 
-// Do is the core method for the completer. It's called by readline when the user presses Tab.
-// Its job is to return a list of suggestions.
 func (c *CustomCompleter) Do(line []rune, pos int) (newLine [][]rune, offset int) {
 	prefix := string(line[:pos])
 
@@ -77,20 +71,15 @@ func (c *CustomCompleter) Do(line []rune, pos int) (newLine [][]rune, offset int
 		return [][]rune{[]rune(completion)}, len(completion)
 	}
 
-	// Multiple suggestions
 	common := commonPrefix(suggestions)
-	// fmt.Println("")
-	// fmt.Println(common)
-	// fmt.Println("")
+
 	if len(common) > len(prefix) {
-		// Partial autocomplete to common prefix
 		completion := common[len(prefix):]
 		tabCounter = 0
 		c.prefix = common
 		return [][]rune{[]rune(completion)}, len(completion)
 	}
 
-	// If prefix unchanged, show suggestions on second tab
 	if prefix == c.prefix {
 		tabCounter++
 	} else {
@@ -159,7 +148,6 @@ func handleShellInput(input string) (string, []string, fileHandle, fileHandle) {
 	var Stdoutfile fileHandle
 	var Stderrfile fileHandle
 	var mode string
-	//fmt.Println(input)
 
 	key := 0
 	for key < len(input) {
@@ -207,13 +195,12 @@ func handleShellInput(input string) (string, []string, fileHandle, fileHandle) {
 			}
 		case r == '\'' || r == '"':
 			if len(stack) > 0 && stack[len(stack)-1] == r {
-				stack = stack[:len(stack)-1] // pop
+				stack = stack[:len(stack)-1]
 			} else if len(stack) > 0 && stack[len(stack)-1] != r {
 				buffer.WriteRune(r)
 			} else {
-				stack = append(stack, r) // push
+				stack = append(stack, r)
 			}
-			// Don't write quotes to buffer
 		case unicode.IsSpace(r) && len(stack) == 0:
 			if buffer.Len() > 0 {
 				token := buffer.String()
@@ -233,7 +220,7 @@ func handleShellInput(input string) (string, []string, fileHandle, fileHandle) {
 				default:
 					result = append(result, buffer.String())
 				}
-				mode = "" // reset after use
+				mode = ""
 				buffer.Reset()
 			}
 
@@ -262,24 +249,21 @@ func handleShellInput(input string) (string, []string, fileHandle, fileHandle) {
 			result = append(result, buffer.String())
 		}
 	}
-	// fmt.Println(result)
-	// fmt.Println(Stdoutfile)
-	// fmt.Println("we11111")
-	// fmt.Println(Stderrfile)
+	if len(result) == 0 {
+		return "", []string{}, Stdoutfile, Stderrfile
+	}
 	return result[0], result[1:], Stdoutfile, Stderrfile
 }
 
 func fileWriteAppend(input string, stdFile fileHandle) {
 	file, err := os.OpenFile(stdFile.fileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		//fmt.Println("Error opening file:", err)
 		return
 	}
 	defer file.Close()
 
 	_, err = file.WriteString(input)
 	if err != nil {
-		//fmt.Println("Error writing to file:", err)
 		return
 	}
 
@@ -310,16 +294,12 @@ func createFile(filename string) {
 
 		dir := filepath.Dir(filename)
 
-		// Create the directory if it doesn't exist
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			//fmt.Println("Failed to create directory:", err)
 			return
 		}
 		err := os.WriteFile(filename, []byte(""), 0644)
 		if err != nil {
 			log.Println("Error writing file:", err)
-		} else {
-			//log.Println("Saved file:", filename)
 		}
 	}
 }
@@ -335,7 +315,6 @@ func makeUniqueSort(res []string) []string {
 		}
 	}
 
-	// Sort the unique slice
 	sort.Strings(uniqueSlice)
 	return uniqueSlice
 }
@@ -430,14 +409,10 @@ func executePipeline(input string) {
 		}
 
 		if isBuiltin(cmdName) {
-			// Built-in as pipeline participant
 			captureCmd := cmdName
 			captureArgs := args
-			// captureStdin := stdin
-
 			captureStdout := stdout
 			procs = append(procs, func() error {
-				// For built-ins, only ECHO, PWD, TYPE are supported in pipeline
 				switch captureCmd {
 				case ECHO:
 					fmt.Fprintln(captureStdout, strings.Join(captureArgs, " "))
@@ -476,7 +451,6 @@ func executePipeline(input string) {
 				return nil
 			})
 		} else {
-			// External command
 			captureCmd := cmdName
 			captureArgs := args
 			captureStdin := stdin
@@ -491,12 +465,10 @@ func executePipeline(input string) {
 		}
 	}
 
-	// Launch all procs
 	var errs = make(chan error, len(procs))
 	for i, proc := range procs {
 		go func(i int, proc func() error) {
 			err := proc()
-			// Close write ends of pipes after writing
 			if i < len(pipes) {
 				pipes[i].w.Close()
 			}
@@ -507,7 +479,6 @@ func executePipeline(input string) {
 		}(i, proc)
 	}
 
-	// Wait for all
 	for range procs {
 		<-errs
 	}
@@ -540,21 +511,17 @@ func newhistorylist() *historylist {
 func readHistory(filename string, historycmd *historylist, written bool) {
 	file, err := os.Open(filename)
 	if err != nil {
-		//fmt.Println("Error opening file:", err)
 		return
 	}
 	defer file.Close()
 
-	// Create a new Scanner for the file
 	scanner := bufio.NewScanner(file)
 
-	// Iterate over each line
 	for scanner.Scan() {
-		line := scanner.Text() // Get the current line as a string
+		line := scanner.Text()
 		historycmd.push(line, written)
 	}
 
-	// Check for errors during the scan
 	if err := scanner.Err(); err != nil {
 		log.Fatalf("error during scan: %s", err)
 	}
@@ -564,12 +531,10 @@ func writeHistory(filename string, historycmd *historylist, fileappendmode bool)
 	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 
 	if err != nil {
-		//fmt.Println("Error opening file:", err)
 		return
 	}
 	defer file.Close()
 
-	// Create a new Scanner for the file
 	writer := bufio.NewWriter(file)
 	for _, historycmd := range historycmd.list() {
 		if historycmd.written == false {
@@ -583,7 +548,6 @@ func writeHistory(filename string, historycmd *historylist, fileappendmode bool)
 	if fileappendmode == true {
 		historycmd.cmdlist = nil
 	}
-	// Flush the buffer to ensure all data is written to the file
 	err = writer.Flush()
 	if err != nil {
 		log.Fatalf("failed flushing buffer: %s", err)
@@ -591,10 +555,7 @@ func writeHistory(filename string, historycmd *historylist, fileappendmode bool)
 }
 
 func main() {
-	// Uncomment this block to pass the first stage
-
 	path := os.Getenv("PATH")
-	//path := "/tmp/foo"
 	path_split := strings.Split(path, ":")
 	execCmd := ReadDir(path)
 
@@ -627,28 +588,23 @@ func main() {
 		readHistory(os.Getenv("HISTFILE"), historycmd, true)
 	}
 
-	// Wait for user input
 	for {
-		//fmt.Fprint(os.Stdout, "$ ")
 		cmd, err := l.Readline()
-		//cmd, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		//fmt.Println(len(cmd))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Error reading input:", err)
 			os.Exit(1)
 		}
 
 		cmd = strings.TrimSuffix(cmd, "\n")
+		if cmd == "" {
+			continue
+		}
 
 		if strings.Contains(cmd, "|") {
 			executePipeline(cmd)
 			continue
 		}
 
-		//command_parts := strings.Split(strings.TrimSpace(cmd), " ")
-		//command := command_parts[0]
-		//args := command_parts[1:]
-		//fmt.Println(args)
 		command, args, Stdoutfile, Stderrfile := handleShellInput(cmd)
 
 		tabCounter = 0
@@ -666,6 +622,9 @@ func main() {
 		case ECHO:
 			writeOutput(strings.Join(args, " "), Stdoutfile, true)
 		case "exit":
+			if len(args) == 0 {
+				os.Exit(0)
+			}
 			exit_code, err := strconv.ParseInt(args[0], 10, 64)
 			if err != nil {
 				os.Exit(1)
@@ -674,6 +633,45 @@ func main() {
 				writeHistory(os.Getenv("HISTFILE"), historycmd, true)
 			}
 			os.Exit(int(exit_code))
+		case CD:
+			var dir string
+			if len(args) == 0 {
+				var err error
+				dir, err = os.UserHomeDir()
+				if err != nil {
+					errorMsg := fmt.Sprintf("cd: %s\n", err)
+					if Stderrfile.fileName != "" {
+						writeOutput(errorMsg, Stderrfile, false)
+					} else {
+						fmt.Fprint(os.Stderr, errorMsg)
+					}
+					continue
+				}
+			} else {
+				dir = args[0]
+				if dir == "~" {
+					home, err := os.UserHomeDir()
+					if err != nil {
+						continue
+					}
+					dir = home
+				} else if strings.HasPrefix(dir, "~/") {
+					home, err := os.UserHomeDir()
+					if err != nil {
+						continue
+					}
+					dir = filepath.Join(home, dir[2:])
+				}
+			}
+
+			if err := os.Chdir(dir); err != nil {
+				errorMsg := fmt.Sprintf("cd: %s: No such file or directory\n", args[0])
+				if Stderrfile.fileName != "" {
+					writeOutput(errorMsg, Stderrfile, false)
+				} else {
+					fmt.Fprint(os.Stderr, errorMsg)
+				}
+			}
 		case HISTORY:
 			limit_history := 0
 			if len(args) > 0 {
@@ -682,7 +680,6 @@ func main() {
 					var parsed int64
 					parsed, err = strconv.ParseInt(args[0], 10, 64)
 					if err != nil {
-						// handle error
 					}
 					limit_history = int(parsed)
 				} else if len(args) == 2 && args[0] == "-r" {
@@ -712,7 +709,10 @@ func main() {
 				writeOutput(temp+" "+historycmd.cmd, Stdoutfile, true)
 			}
 		case TYPE:
-			slice := availableCommand[:] // Convert array to slice
+			slice := availableCommand[:]
+			if len(args) < 1 {
+				continue
+			}
 			target := args[0]
 			if slices.Contains(slice, target) {
 				writeOutput(target+" is a shell builtin", Stdoutfile, true)
@@ -734,30 +734,27 @@ func main() {
 				}
 			}
 		default:
-			if len(path) > 0 {
-				foundCommand = false
-				for _, exec_path := range path_split {
-					if fileExists(exec_path + "/" + command) {
-						foundCommand = true
-						exec_cmd := exec.Command(command, args[0:]...)
-						exec_cmd.Stderr = &stderr
-						exec_cmd.Stdout = &stdout
-						if err := exec_cmd.Run(); err != nil {
-							writeOutput(stderr.String(), Stderrfile, false)
-							stderr.Reset()
-						}
-						if stdout.String() != "" {
-							writeOutput(stdout.String(), Stdoutfile, false)
-							stdout.Reset()
-						}
-						break
+			foundCommand = false
+			for _, exec_path := range path_split {
+				if fileExists(exec_path + "/" + command) {
+					foundCommand = true
+					exec_cmd := exec.Command(command, args...)
+					exec_cmd.Stderr = &stderr
+					exec_cmd.Stdout = &stdout
+					if err := exec_cmd.Run(); err != nil {
+						writeOutput(stderr.String(), Stderrfile, false)
+						stderr.Reset()
 					}
+					if stdout.String() != "" {
+						writeOutput(stdout.String(), Stdoutfile, false)
+						stdout.Reset()
+					}
+					break
 				}
 			}
 			if !foundCommand {
 				writeOutput(command+": command not found", Stdoutfile, true)
 			}
-
 		}
 	}
 }
