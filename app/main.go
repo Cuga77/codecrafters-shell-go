@@ -135,59 +135,54 @@ func executeExternalCommand(programName string, args []string) {
 func parseCommand(command string) []string {
 	var args []string
 	var currentArg strings.Builder
-	runes := []rune(strings.TrimSpace(command))
-	i := 0
-	inQuote := rune(0)
+	var inQuote rune = 0
+	var isEscaped bool = false
 
-	for i < len(runes) {
-		r := runes[i]
-		if inQuote == '\'' {
-			if r == '\'' {
-				inQuote = 0
-			} else {
-				currentArg.WriteRune(r)
-			}
-		} else if inQuote == '"' {
-			if r == '"' {
-				inQuote = 0
-			} else if r == '\\' {
-				i++
-				if i < len(runes) {
-					nextChar := runes[i]
-					if nextChar == '"' || nextChar == '\\' {
-						currentArg.WriteRune(nextChar)
-					} else {
-						currentArg.WriteRune('\\')
-						currentArg.WriteRune(nextChar)
-					}
-				} else {
-					currentArg.WriteRune('\\')
-				}
-			} else {
-				currentArg.WriteRune(r)
-			}
-		} else {
-			if r == ' ' || r == '\t' {
-				if currentArg.Len() > 0 {
-					args = append(args, currentArg.String())
-					currentArg.Reset()
-				}
-			} else if r == '\'' || r == '"' {
-				inQuote = r
-			} else if r == '\\' {
-				if i < len(runes) {
-					currentArg.WriteRune(runes[i])
-				}
-			} else {
-				currentArg.WriteRune(r)
-			}
+	for _, r := range strings.TrimSpace(command) {
+		if isEscaped {
+			currentArg.WriteRune(r)
+			isEscaped = false
+			continue
 		}
-		i++
+
+		if r == '\\' {
+			if inQuote == '\'' {
+				currentArg.WriteRune(r)
+			} else {
+				isEscaped = true
+			}
+			continue
+		}
+
+		if inQuote != 0 {
+			if r == inQuote {
+				inQuote = 0
+			} else {
+				currentArg.WriteRune(r)
+			}
+			continue
+		}
+
+		if r == '\'' || r == '"' {
+			inQuote = r
+			continue
+		}
+
+		if r == ' ' || r == '\t' {
+			if currentArg.Len() > 0 {
+				args = append(args, currentArg.String())
+				currentArg.Reset()
+			}
+			continue
+		}
+
+		currentArg.WriteRune(r)
 	}
 
 	if currentArg.Len() > 0 {
 		args = append(args, currentArg.String())
 	}
+
 	return args
 }
 
