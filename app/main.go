@@ -135,47 +135,59 @@ func executeExternalCommand(programName string, args []string) {
 func parseCommand(command string) []string {
 	var args []string
 	var currentArg strings.Builder
-	var quoteType rune
-	var isEscaped bool
+	runes := []rune(strings.TrimSpace(command))
+	i := 0
+	inQuote := rune(0)
 
-	command = strings.TrimSpace(command)
-
-	for _, r := range command {
-		if isEscaped {
-			currentArg.WriteRune(r)
-			isEscaped = false
-			continue
-		}
-
-		if r == '\\' && quoteType != '\'' {
-			isEscaped = true
-			continue
-		}
-
-		if quoteType == 0 {
-			if r == '\'' || r == '"' {
-				quoteType = r
-			} else if r == ' ' {
-				if currentArg.Len() > 0 {
-					args = append(args, currentArg.String())
-					currentArg.Reset()
+	for i < len(runes) {
+		r := runes[i]
+		if inQuote == '\'' {
+			if r == '\'' {
+				inQuote = 0
+			} else {
+				currentArg.WriteRune(r)
+			}
+		} else if inQuote == '"' {
+			if r == '"' {
+				inQuote = 0
+			} else if r == '\\' {
+				i++
+				if i < len(runes) {
+					nextChar := runes[i]
+					if nextChar == '"' || nextChar == '\\' {
+						currentArg.WriteRune(nextChar)
+					} else {
+						currentArg.WriteRune('\\')
+						currentArg.WriteRune(nextChar)
+					}
+				} else {
+					currentArg.WriteRune('\\')
 				}
 			} else {
 				currentArg.WriteRune(r)
 			}
 		} else {
-			if r == quoteType {
-				quoteType = 0
+			if r == ' ' || r == '\t' {
+				if currentArg.Len() > 0 {
+					args = append(args, currentArg.String())
+					currentArg.Reset()
+				}
+			} else if r == '\'' || r == '"' {
+				inQuote = r
+			} else if r == '\\' {
+				if i < len(runes) {
+					currentArg.WriteRune(runes[i])
+				}
 			} else {
 				currentArg.WriteRune(r)
 			}
 		}
+		i++
 	}
 
 	if currentArg.Len() > 0 {
 		args = append(args, currentArg.String())
 	}
-
 	return args
 }
 
