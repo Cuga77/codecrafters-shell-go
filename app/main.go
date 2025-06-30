@@ -761,9 +761,15 @@ func main() {
 				if fileInfo, err := os.Stat(fullPath); err == nil {
 					if !fileInfo.IsDir() && (fileInfo.Mode()&0111 != 0) {
 						foundCommand = true
-						exec_cmd := exec.Command(fullPath, args...)
-						exec_cmd.Stderr = &stderr
-						exec_cmd.Stdout = &stdout
+
+						// Manually create the command to control the arguments.
+						exec_cmd := &exec.Cmd{
+							Path:   fullPath,                           // Path to the executable file.
+							Args:   append([]string{command}, args...), // Program arguments, starting with the command name.
+							Stdout: &stdout,
+							Stderr: &stderr,
+						}
+
 						if err := exec_cmd.Run(); err != nil {
 							writeOutput(stderr.String(), Stderrfile, false)
 							stderr.Reset()
