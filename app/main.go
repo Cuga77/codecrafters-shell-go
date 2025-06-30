@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -29,14 +30,44 @@ type shellCompleter struct{}
 func (s *shellCompleter) Do(line []rune, pos int) ([][]rune, int) {
 	prefix := string(line[:pos])
 
-	var completions [][]rune
+	if strings.Contains(prefix, " ") {
+		return nil, 0
+	}
+
+	suggestions := make(map[string]struct{})
+
 	for _, cmd := range COMMANDS {
 		if strings.HasPrefix(cmd, prefix) {
-			completions = append(completions, []rune(cmd))
+			suggestions[cmd] = struct{}{}
 		}
 	}
 
-	if len(completions) > 0 {
+	pathStr := os.Getenv("PATH")
+	paths := filepath.SplitList(pathStr)
+
+	for _, path := range paths {
+		files, err := os.ReadDir(path)
+		if err != nil {
+			continue
+		}
+
+		for _, file := range files {
+			if !file.IsDir() {
+				info, err := file.Info()
+				if err == nil && info.Mode().Perm()&0111 != 0 {
+					if strings.HasPrefix(file.Name(), prefix) {
+						suggestions[file.Name()] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+
+	if len(suggestions) > 0 {
+		var completions [][]rune
+		for s := range suggestions {
+			completions = append(completions, []rune(s))
+		}
 		return completions, len(prefix)
 	}
 
@@ -103,19 +134,6 @@ func parseCommand(command string) []string {
 		args = append(args, currentArg.String())
 	}
 	return args
-}
-
-type bellCompleter struct {
-	completer readline.AutoCompleter
-}
-
-func (c *bellCompleter) Do(line []rune, pos int) ([][]rune, int) {
-	completions, length := c.completer.Do(line, pos)
-	if len(completions) == 0 {
-		fmt.Print("\x07")
-	}
-
-	return completions, length
 }
 
 func exit(args []string) {
@@ -281,19 +299,9 @@ func executeExternalCommand(programName string, args []string, stdoutFile string
 }
 
 func main() {
-	prefixCompleter := readline.NewPrefixCompleter(
-		readline.PcItem("echo"),
-		readline.PcItem("exit"),
-		readline.PcItem("type"),
-		readline.PcItem("pwd"),
-		readline.PcItem("cd"),
-	)
-
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt: "$ ",
-		AutoComplete: &bellCompleter{
-			completer: prefixCompleter,
-		},
+		Prompt:       "$ ",
+		AutoComplete: &shellCompleter{},
 	})
 	if err != nil {
 		panic(err)
@@ -323,29 +331,28 @@ func main() {
 			word := commandWords[i]
 			isRedirect := false
 
-			switch word {
-			case ">", "1>":
+			if word == ">" || word == "1>" {
 				if i+1 < len(commandWords) {
 					stdoutFile = commandWords[i+1]
 					appendStdout = false
 					i += 2
 					isRedirect = true
 				}
-			case ">>", "1>>":
+			} else if word == ">>" || word == "1>>" {
 				if i+1 < len(commandWords) {
 					stdoutFile = commandWords[i+1]
 					appendStdout = true
 					i += 2
 					isRedirect = true
 				}
-			case "2>":
+			} else if word == "2>" {
 				if i+1 < len(commandWords) {
 					stderrFile = commandWords[i+1]
 					appendStderr = false
 					i += 2
 					isRedirect = true
 				}
-			case "2>>":
+			} else if word == "2>>" {
 				if i+1 < len(commandWords) {
 					stderrFile = commandWords[i+1]
 					appendStderr = true
