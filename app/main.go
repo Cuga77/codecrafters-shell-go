@@ -23,7 +23,7 @@ func contains(command string, commands []string) bool {
 }
 
 func invalidCommand(command string) {
-	fmt.Print(command[:] + ": command not found")
+	fmt.Println(command[:] + ": command not found")
 }
 
 func echo(input []string) {
