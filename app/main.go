@@ -135,20 +135,27 @@ func executeExternalCommand(programName string, args []string) {
 func parseCommand(command string) []string {
 	var args []string
 	var currentArg strings.Builder
-	inQuotes := false
+	var quoteType rune
+	command = strings.TrimSpace(command)
 
 	for _, r := range command {
-		if r == '\'' {
-			inQuotes = !inQuotes
-			continue
-		}
-		if r == ' ' && !inQuotes {
-			if currentArg.Len() > 0 {
-				args = append(args, currentArg.String())
-				currentArg.Reset()
+		if quoteType == 0 {
+			if r == '\'' || r == '"' {
+				quoteType = r
+			} else if r == ' ' {
+				if currentArg.Len() > 0 {
+					args = append(args, currentArg.String())
+					currentArg.Reset()
+				}
+			} else {
+				currentArg.WriteRune(r)
 			}
 		} else {
-			currentArg.WriteRune(r)
+			if r == quoteType {
+				quoteType = 0
+			} else {
+				currentArg.WriteRune(r)
+			}
 		}
 	}
 
