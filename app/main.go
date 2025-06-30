@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.comcom/chzyer/readline"
+	"github.com/chzyer/readline"
 )
 
 const (
@@ -20,6 +20,7 @@ const (
 	StateEscape
 	StateInDoubleQuoteEscape
 )
+
 const TERMINAL_BELL = "\x07"
 
 func parse(line string) ([]string, error) {
@@ -27,6 +28,7 @@ func parse(line string) ([]string, error) {
 	var currentPart strings.Builder
 	state := StateNormal
 	line = strings.TrimSpace(line)
+
 	for _, r := range line {
 		switch state {
 		case StateNormal:
@@ -71,9 +73,11 @@ func parse(line string) ([]string, error) {
 			state = StateNormal
 		}
 	}
+
 	if currentPart.Len() > 0 {
 		parts = append(parts, currentPart.String())
 	}
+
 	if state == StateInSingleQuote {
 		return nil, errors.New("unclosed single quote")
 	}
@@ -102,6 +106,7 @@ func buildAllCommands() []readline.PrefixCompleterInterface {
 	for cmd := range builtin {
 		commandSet[cmd] = true
 	}
+
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		files, err := os.ReadDir(dir)
 		if err != nil {
@@ -116,11 +121,13 @@ func buildAllCommands() []readline.PrefixCompleterInterface {
 			if err != nil {
 				continue
 			}
+
 			if info.Mode().Perm()&0111 != 0 {
 				commandSet[file.Name()] = true
 			}
 		}
 	}
+
 	for cmd := range commandSet {
 		items = append(items, readline.PcItem(cmd))
 	}
@@ -129,6 +136,7 @@ func buildAllCommands() []readline.PrefixCompleterInterface {
 
 func (c *customCompleter) Do(line []rune, pos int) ([][]rune, int) {
 	suggestions, n := c.innerCompleter.Do(line, pos)
+
 	if len(suggestions) == 0 {
 		c.lastLine = nil
 		fmt.Print(TERMINAL_BELL)
@@ -185,6 +193,7 @@ func main() {
 		panic(err)
 	}
 	defer rl.Close()
+
 	for {
 		command, err := rl.Readline()
 
@@ -277,6 +286,7 @@ func main() {
 					file.Close()
 				}
 			}
+
 			if appendFile != "" {
 				file, err := os.OpenFile(appendFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 				if err == nil {
