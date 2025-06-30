@@ -87,9 +87,13 @@ func typeBuiltIn(input []string) {
 func executeExternalCommand(programName string, args []string) {
 	fullPath, found := searchPath(programName)
 	if found {
-		cmd := exec.Command(fullPath+"/"+programName, args...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd := &exec.Cmd{
+			Path:   fullPath + "/" + programName,
+			Args:   append([]string{programName}, args...),
+			Stdout: os.Stdout,
+			Stderr: os.Stderr,
+		}
+
 		err := cmd.Run()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
