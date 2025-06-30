@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
@@ -48,16 +49,16 @@ func exit(input []string) {
 
 func searchPath(command string) (string, bool) {
 	path := os.ExpandEnv("$PATH")
-	pathParts := strings.SplitSeq(path, ":")
-	for part := range pathParts {
+	pathParts := strings.Split(path, ":")
+	for _, part := range pathParts {
 		files, err := os.ReadDir(part)
 		if err != nil {
 			continue
 		}
 		for _, file := range files {
 			if strings.TrimSpace(file.Name()) == strings.TrimSpace(command) {
-				perm, err := file.Info()
-				if err == nil && perm.Mode().Perm()&0111 != 0 {
+				info, err := file.Info()
+				if err == nil && info.Mode().Perm()&0111 != 0 {
 					return part, true
 
 				}
@@ -83,6 +84,21 @@ func typeBuiltIn(input []string) {
 	}
 }
 
+func executeExternalCommand(programName string, args []string) {
+	fullPath, found := searchPath(programName)
+	if found {
+		cmd := exec.Command(fullPath+"/"+programName, args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err := cmd.Run()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
+		}
+	} else {
+		invalidCommand(programName)
+	}
+}
+
 func main() {
 	for {
 		fmt.Fprint(os.Stdout, "$ ")
@@ -101,7 +117,7 @@ func main() {
 		case "type":
 			typeBuiltIn(commandWords[1:])
 		default:
-			invalidCommand(strings.TrimSpace(command))
+			executeExternalCommand(commandWords[0], commandWords[1:])
 		}
 	}
 }
