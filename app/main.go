@@ -221,7 +221,10 @@ func executeExternalCommand(programName string, args []string, stdoutFile string
 		return
 	}
 
-	cmd := exec.Command(path, args...)
+	cmd := &exec.Cmd{
+		Path: path,
+		Args: append([]string{programName}, args...),
+	}
 
 	if stdoutFile != "" {
 		file, err := os.Create(stdoutFile)
