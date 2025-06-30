@@ -136,9 +136,22 @@ func parseCommand(command string) []string {
 	var args []string
 	var currentArg strings.Builder
 	var quoteType rune
+	var isEscaped bool
+
 	command = strings.TrimSpace(command)
 
 	for _, r := range command {
+		if isEscaped {
+			currentArg.WriteRune(r)
+			isEscaped = false
+			continue
+		}
+
+		if r == '\\' && quoteType != '\'' {
+			isEscaped = true
+			continue
+		}
+
 		if quoteType == 0 {
 			if r == '\'' || r == '"' {
 				quoteType = r
