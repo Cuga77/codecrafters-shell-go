@@ -24,6 +24,26 @@ type nopCloser struct {
 
 func (nopCloser) Close() error { return nil }
 
+type shellCompleter struct{}
+
+func (s *shellCompleter) Do(line []rune, pos int) ([][]rune, int) {
+	prefix := string(line[:pos])
+
+	var completions [][]rune
+	for _, cmd := range COMMANDS {
+		if strings.HasPrefix(cmd, prefix) {
+			completions = append(completions, []rune(cmd))
+		}
+	}
+
+	if len(completions) > 0 {
+		return completions, len(prefix)
+	}
+
+	fmt.Print("\x07")
+	return nil, 0
+}
+
 func parseCommand(command string) []string {
 	var args []string
 	var currentArg strings.Builder
@@ -248,17 +268,9 @@ func executeExternalCommand(programName string, args []string, stdoutFile string
 }
 
 func main() {
-	completer := readline.NewPrefixCompleter(
-		readline.PcItem("echo"),
-		readline.PcItem("exit"),
-		readline.PcItem("type"),
-		readline.PcItem("pwd"),
-		readline.PcItem("cd"),
-	)
-
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:       "$ ",
-		AutoComplete: completer,
+		AutoComplete: &shellCompleter{},
 	})
 	if err != nil {
 		panic(err)
