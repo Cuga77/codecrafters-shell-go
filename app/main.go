@@ -105,6 +105,19 @@ func parseCommand(command string) []string {
 	return args
 }
 
+type bellCompleter struct {
+	completer readline.AutoCompleter
+}
+
+func (c *bellCompleter) Do(line []rune, pos int) ([][]rune, int) {
+	completions, length := c.completer.Do(line, pos)
+	if len(completions) == 0 {
+		fmt.Print("\x07")
+	}
+
+	return completions, length
+}
+
 func exit(args []string) {
 	os.Exit(0)
 }
@@ -268,9 +281,19 @@ func executeExternalCommand(programName string, args []string, stdoutFile string
 }
 
 func main() {
+	prefixCompleter := readline.NewPrefixCompleter(
+		readline.PcItem("echo"),
+		readline.PcItem("exit"),
+		readline.PcItem("type"),
+		readline.PcItem("pwd"),
+		readline.PcItem("cd"),
+	)
+
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:       "$ ",
-		AutoComplete: &shellCompleter{},
+		Prompt: "$ ",
+		AutoComplete: &bellCompleter{
+			completer: prefixCompleter,
+		},
 	})
 	if err != nil {
 		panic(err)
@@ -300,28 +323,29 @@ func main() {
 			word := commandWords[i]
 			isRedirect := false
 
-			if word == ">" || word == "1>" {
+			switch word {
+			case ">", "1>":
 				if i+1 < len(commandWords) {
 					stdoutFile = commandWords[i+1]
 					appendStdout = false
 					i += 2
 					isRedirect = true
 				}
-			} else if word == ">>" || word == "1>>" {
+			case ">>", "1>>":
 				if i+1 < len(commandWords) {
 					stdoutFile = commandWords[i+1]
 					appendStdout = true
 					i += 2
 					isRedirect = true
 				}
-			} else if word == "2>" {
+			case "2>":
 				if i+1 < len(commandWords) {
 					stderrFile = commandWords[i+1]
 					appendStderr = false
 					i += 2
 					isRedirect = true
 				}
-			} else if word == "2>>" {
+			case "2>>":
 				if i+1 < len(commandWords) {
 					stderrFile = commandWords[i+1]
 					appendStderr = true
