@@ -57,6 +57,17 @@ func exit(input []string) {
 	}
 }
 
+func changeDirectory(args []string) {
+	if len(args) < 1 {
+		return
+	}
+	targetDir := args[0]
+	err := os.Chdir(targetDir)
+	if err != nil {
+		fmt.Printf("cd: %s: No such file or directory\n", targetDir)
+	}
+}
+
 func searchPath(command string) (string, bool) {
 	path := os.ExpandEnv("$PATH")
 	pathParts := strings.Split(path, ":")
@@ -132,6 +143,8 @@ func main() {
 			typeBuiltIn(commandWords[1:])
 		case "pwd":
 			pwd(commandWords[1:])
+		case "cd":
+			changeDirectory(commandWords[1:])
 		default:
 			executeExternalCommand(commandWords[0], commandWords[1:])
 		}
