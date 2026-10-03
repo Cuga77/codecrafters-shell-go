@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l app)"
+      - run: go vet ./app
+      - run: go build -o mysh ./app
+      - name: Smoke test
+        run: |
+          out=$(printf 'echo "a   b" '"'"'c'"'"'\necho one two | wc -w\ntype echo\nexit 0\n' | ./mysh 2>&1)
+          echo "$out"
+          echo "$out" | grep -qx 'a   b c'
+          echo "$out" | grep -qx '2'
+          echo "$out" | grep -qx 'echo is a shell builtin'
